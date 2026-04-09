@@ -6,14 +6,15 @@ Deploys the BrightMatter API and cron workers to Modal cloud.
     modal deploy modal_app.py
 
 Functions:
-    api_endpoint         — FastAPI ASGI app (always on)
-    worker_cron          — Event processing + consolidation (every 15 min)
-    platform_data_cron   — Daily platform data pull at 1pm EST / 18:00 UTC
-    fmt_data_sync_cron   — Daily FMT app data sync via MCP → BQ (2pm EST / 19:00 UTC)
-    platform_backfill    — On-demand historical backfill
-    weekly_eval          — Shadow eval + gold standards (Sundays 10:00 UTC)
-    improvement_review   — Improvement analysis (Mondays 12:00 UTC)
-    health_check         — On-demand connectivity check
+    api_endpoint                — FastAPI ASGI app (always on)
+    worker_cron                 — Event processing + consolidation (every 15 min)
+    platform_data_cron          — Daily platform data pull at 1pm EST / 18:00 UTC
+    fmt_data_sync_cron          — Daily FMT app data sync via MCP → BQ (2pm EST / 19:00 UTC)
+    mrchristmas_powerbi_sync_cron — Daily Power BI → BQ sync (3pm EST / 20:00 UTC)
+    platform_backfill           — On-demand historical backfill
+    weekly_eval                 — Shadow eval + gold standards (Sundays 10:00 UTC)
+    improvement_review          — Improvement analysis (Mondays 12:00 UTC)
+    health_check                — On-demand connectivity check
 """
 
 import modal
@@ -46,7 +47,7 @@ _required_secrets = [
 ]
 
 _optional_secrets = []
-for _name in ("bm-bigquery", "bm-airtable", "mh1-firebase", "mh1-all", "bm-mcp-fmt"):
+for _name in ("bm-bigquery", "bm-airtable", "mh1-firebase", "mh1-all", "bm-mcp-fmt", "bm-powerbi-mrchristmas"):
     try:
         _optional_secrets.append(modal.Secret.from_name(_name, required_keys=[]))
     except Exception:
@@ -177,6 +178,35 @@ def fmt_data_sync_cron():
         stats["gtm_error"] = str(e)
 
     return stats
+
+
+# ── Mr. Christmas Power BI Sync (daily 3pm EST = 20:00 UTC) ──────────
+
+@app.function(
+    image=bm_image,
+    secrets=bm_secrets,
+    timeout=1800,
+    schedule=modal.Cron("0 20 * * *"),
+)
+def mrchristmas_powerbi_sync_cron():
+    """Daily sync: Mr. Christmas Power BI (Sales Reports V2) → BigQuery."""
+    _setup_workspace()
+
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    logger = logging.getLogger("brightmatter.cron.powerbi_mrchristmas")
+
+    try:
+        from lib.powerbi_sync import PowerBISync
+        stats = PowerBISync().run()
+        logger.info(f"Power BI sync complete: {stats}")
+        return stats
+    except Exception as e:
+        logger.error(f"Power BI sync failed: {e}", exc_info=True)
+        return {"error": str(e)}
 
 
 # ── Platform Backfill (on-demand) ────────────────────────────────────
