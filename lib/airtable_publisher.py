@@ -5,6 +5,9 @@ Pushes high-confidence semantic patterns to Airtable so they're
 visible alongside MH-OS recommendations. Uses the same REST API
 pattern as MH-OS Trigger.dev tasks (no SDK, just requests).
 
+Supports client-specific Airtable bases: pass a different base_id
+and recommendations_table_id per client.
+
 Env vars:
     AIRTABLE_API_KEY   — Personal Access Token (pat...)
     AIRTABLE_BASE_ID   — Base ID (default: appfuhAEXKZBKcDLi — MH-OS ops base)
@@ -25,6 +28,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_ID = "appfuhAEXKZBKcDLi"
+DEFAULT_RECOMMENDATIONS_TABLE_ID = "tblGQSQMSGSBpOXQj"
 AIRTABLE_API_URL = "https://api.airtable.com/v0"
 BATCH_SIZE = 10  # Airtable max records per request
 
@@ -37,10 +41,12 @@ class AirtablePublisher:
         api_key: Optional[str] = None,
         base_id: Optional[str] = None,
         table_name: str = "BrightMatter Patterns",
+        recommendations_table_id: Optional[str] = None,
     ):
         self._api_key = api_key or os.environ.get("AIRTABLE_API_KEY", "")
         self._base_id = base_id or os.environ.get("AIRTABLE_BASE_ID", DEFAULT_BASE_ID)
         self._table_name = table_name
+        self._rec_table_id = recommendations_table_id or DEFAULT_RECOMMENDATIONS_TABLE_ID
 
         if not self._api_key:
             raise ValueError("AIRTABLE_API_KEY must be set")
@@ -147,44 +153,38 @@ class AirtablePublisher:
         return stats
 
     def publish_as_recommendations(
-        self, patterns: List[Dict[str, Any]]
+        self, recommendations: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Publish patterns to the existing Recommendations table
-        (same schema MH-OS tasks use) instead of a separate table.
+        """Publish pre-formatted recommendations to the Recommendations table.
+
+        Accepts dicts with keys matching the Recommendation schema:
+            source, type, summary, details, channels, confidence
+
+        These are produced by lib.recommendation_formatter.format_pattern().
         """
-        import json
         import requests
 
-        stats = {"total": len(patterns), "published": 0, "failed": 0, "errors": []}
-        rec_url = f"{AIRTABLE_API_URL}/{self._base_id}/tblGQSQMSGSBpOXQj"
+        stats = {"total": len(recommendations), "published": 0, "failed": 0, "errors": []}
+        rec_url = f"{AIRTABLE_API_URL}/{self._base_id}/{self._rec_table_id}"
 
-        for i in range(0, len(patterns), BATCH_SIZE):
-            batch = patterns[i : i + BATCH_SIZE]
+        for i in range(0, len(recommendations), BATCH_SIZE):
+            batch = recommendations[i : i + BATCH_SIZE]
             records = []
-            for p in batch:
-                confidence = p.get("confidence", 0)
-                records.append({
-                    "fields": {
-                        "Date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                        "Source": "BrightMatter",
-                        "Type": "Pattern",
-                        "Summary": (
-                            f"[{p.get('domain', 'generic')}] "
-                            f"{p.get('skill_name', 'unknown')}: "
-                            f"{json.dumps(p.get('recommendation', {}))[:200]}"
-                        ),
-                        "Details": (
-                            f"Pattern: {p.get('pattern_id', '')}\n"
-                            f"Level: {p.get('pattern_level', 'segment')}\n"
-                            f"Condition: {json.dumps(p.get('condition', {}))}\n"
-                            f"Evidence: {p.get('evidence_count', 0)} observations "
-                            f"({p.get('successes', 0)} successes)\n"
-                            f"Confidence: {confidence:.1%}"
-                        ),
-                        "Confidence": f"{confidence:.0%}",
-                        "Status": "Open",
-                    }
-                })
+            for rec in batch:
+                fields: Dict[str, Any] = {
+                    "Date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                    "Source": rec.get("source", "BrightMatter"),
+                    "Type": rec.get("type", "other"),
+                    "Summary": rec.get("summary", "")[:200],
+                    "Details": rec.get("details", ""),
+                    "Confidence": rec.get("confidence", "Medium"),
+                    "Status": "Open",
+                    "Created At": datetime.now(timezone.utc).isoformat(),
+                }
+                channels = rec.get("channels")
+                if channels:
+                    fields["Channels"] = ", ".join(channels) if isinstance(channels, list) else str(channels)
+                records.append({"fields": fields})
 
             try:
                 resp = requests.post(
@@ -198,8 +198,13 @@ class AirtablePublisher:
                 else:
                     stats["failed"] += len(batch)
                     stats["errors"].append(resp.text[:500])
+                    logger.error(
+                        f"Airtable recommendations batch {i // BATCH_SIZE + 1} "
+                        f"failed ({resp.status_code}): {resp.text[:200]}"
+                    )
             except Exception as e:
                 stats["failed"] += len(batch)
                 stats["errors"].append(str(e))
+                logger.error(f"Airtable recommendations batch error: {e}")
 
         return stats
