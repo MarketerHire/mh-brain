@@ -1325,7 +1325,11 @@ class BrightMatterWorker:
     # ── Tier 3: Airtable Pattern Publishing ──────────────────────
 
     def _publish_patterns_to_airtable(self) -> Dict[str, Any]:
-        """Push high-confidence patterns to Airtable after consolidation.
+        """Publish actionable recommendations to client-specific Airtable bases.
+
+        Routes patterns by client_id:
+          - client_id is null  -> MH-OS base (MarketerHire internal)
+          - client_id is set   -> that client's Airtable base (from datasources)
 
         Only runs if AIRTABLE_API_KEY is set. Publishes patterns with
         confidence >= 0.7 and evidence_count >= 3.
@@ -1361,16 +1365,85 @@ class BrightMatterWorker:
             return {"total": len(patterns), "published": 0, "reason": "no new patterns since last publish"}
 
         from lib.airtable_publisher import AirtablePublisher
-        publisher = AirtablePublisher()
-        pub_stats = publisher.publish_as_recommendations(fresh_patterns)
+        from lib.recommendation_formatter import format_patterns
 
-        if pub_stats.get("published", 0) > 0:
+        grouped: Dict[Optional[str], list] = defaultdict(list)
+        for p in fresh_patterns:
+            grouped[p.get("client_id")].append(p)
+
+        stats: Dict[str, Any] = {
+            "total": len(fresh_patterns),
+            "published": 0,
+            "failed": 0,
+            "bases_written": 0,
+            "errors": [],
+        }
+
+        for client_id, client_patterns in grouped.items():
+            formatted = format_patterns(client_patterns)
+            if not formatted:
+                continue
+
+            if client_id is None:
+                base_id = None
+                rec_table_id = None
+                label = "MH-OS (universal)"
+            else:
+                at_config = self._resolve_client_airtable(client_id)
+                if not at_config:
+                    logger.debug(
+                        f"No airtable config for client {client_id}, "
+                        f"skipping {len(formatted)} recommendations"
+                    )
+                    continue
+                base_id = at_config.get("base_id")
+                rec_table_id = at_config.get("recommendations_table_id")
+                label = f"client {client_id}"
+
+            try:
+                publisher = AirtablePublisher(
+                    base_id=base_id,
+                    recommendations_table_id=rec_table_id,
+                )
+                pub_result = publisher.publish_as_recommendations(formatted)
+                published = pub_result.get("published", 0)
+                failed = pub_result.get("failed", 0)
+                stats["published"] += published
+                stats["failed"] += failed
+                if published > 0:
+                    stats["bases_written"] += 1
+                if pub_result.get("errors"):
+                    stats["errors"].extend(pub_result["errors"])
+                logger.info(
+                    f"Airtable {label}: {published} published, {failed} failed"
+                )
+            except Exception as e:
+                stats["failed"] += len(formatted)
+                stats["errors"].append(f"{label}: {e}")
+                logger.error(f"Airtable publish to {label} failed: {e}")
+
+        if stats["published"] > 0:
             self._set_watermark(
                 "airtable-publish",
                 last_processed_at=datetime.now(timezone.utc).isoformat(),
             )
 
-        return pub_stats
+        return stats
+
+    def _resolve_client_airtable(self, client_id: str) -> Optional[Dict[str, Any]]:
+        """Look up a client's Airtable config from their datasources."""
+        try:
+            from lib.platform_ingestion.orchestrator import PlatformDataOrchestrator
+            orch = PlatformDataOrchestrator.__new__(PlatformDataOrchestrator)
+            orch.supabase = self.supabase
+            ds = orch._load_datasources(client_id)
+            if ds and isinstance(ds.get("airtable"), dict):
+                at = ds["airtable"]
+                if at.get("base_id"):
+                    return at
+        except Exception as e:
+            logger.debug(f"Failed to resolve airtable config for {client_id}: {e}")
+        return None
 
     # ── Watermark Helpers ────────────────────────────────────────
 

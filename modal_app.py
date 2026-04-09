@@ -9,6 +9,7 @@ Functions:
     api_endpoint         — FastAPI ASGI app (always on)
     worker_cron          — Event processing + consolidation (every 15 min)
     platform_data_cron   — Daily platform data pull at 1pm EST / 18:00 UTC
+    fmt_data_sync_cron   — Daily FMT app data sync via MCP → BQ (2pm EST / 19:00 UTC)
     platform_backfill    — On-demand historical backfill
     weekly_eval          — Shadow eval + gold standards (Sundays 10:00 UTC)
     improvement_review   — Improvement analysis (Mondays 12:00 UTC)
@@ -45,7 +46,7 @@ _required_secrets = [
 ]
 
 _optional_secrets = []
-for _name in ("bm-bigquery", "bm-airtable", "mh1-firebase", "mh1-all"):
+for _name in ("bm-bigquery", "bm-airtable", "mh1-firebase", "mh1-all", "bm-mcp-fmt"):
     try:
         _optional_secrets.append(modal.Secret.from_name(_name, required_keys=[]))
     except Exception:
@@ -137,6 +138,45 @@ def platform_data_cron():
     except Exception as e:
         logger.error(f"Platform data cron failed: {e}", exc_info=True)
         return {"error": str(e)}
+
+
+# ── FMT Data Sync Cron (daily 2pm EST = 19:00 UTC) ──────────────────
+
+@app.function(
+    image=bm_image,
+    secrets=bm_secrets,
+    timeout=1800,
+    schedule=modal.Cron("0 19 * * *"),
+)
+def fmt_data_sync_cron():
+    """Daily sync: FMT app data (MCP→BQ) + GTM config (MCP→BQ)."""
+    _setup_workspace()
+
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    logger = logging.getLogger("brightmatter.cron.fmt_sync")
+
+    stats = {}
+    try:
+        from lib.mcp_sync import FMTDataSync
+        stats["app"] = FMTDataSync().run()
+        logger.info(f"App sync complete: {stats['app']}")
+    except Exception as e:
+        logger.error(f"App sync failed: {e}", exc_info=True)
+        stats["app_error"] = str(e)
+
+    try:
+        from lib.mcp_sync import GTMSync, BQWriter
+        stats["gtm"] = GTMSync().sync(BQWriter())
+        logger.info(f"GTM sync complete: {stats['gtm']}")
+    except Exception as e:
+        logger.error(f"GTM sync failed: {e}", exc_info=True)
+        stats["gtm_error"] = str(e)
+
+    return stats
 
 
 # ── Platform Backfill (on-demand) ────────────────────────────────────

@@ -289,6 +289,10 @@ def resolve_config(
             return None
         creds = {"api_key": api_key, "location_id": loc_id}
         account_id = loc_id[:8]
+        # Pass through multi-location and BQ config via extra
+        raw_config = dict(raw_config)
+        raw_config.setdefault("additional_locations",
+                              datasources.get("crm", {}).get("additional_locations", []))
 
     else:
         logger.debug(f"No resolver for platform: {platform}")
