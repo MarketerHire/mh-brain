@@ -38,6 +38,11 @@ _INTEGRATION_ALIASES: Dict[str, str] = {
     "ga4": "ga4",
     "polar_analytics": "polar_analytics",
     "polar": "polar_analytics",
+    "ghl": "ghl",
+    "gohighlevel": "ghl",
+    "go_high_level": "ghl",
+    "h_level": "ghl",
+    "highlevel": "ghl",
 }
 
 
@@ -110,7 +115,8 @@ def detect_platforms(datasources: Dict[str, Any]) -> List[Tuple[str, Dict[str, A
 
     # 5. Check top-level named platform blocks
     for key in ("klaviyo", "meta_ads", "google_ads", "shopify", "ga4",
-                "polar_analytics", "outer_signal", "power_bi", "triple_whale"):
+                "polar_analytics", "outer_signal", "power_bi", "triple_whale",
+                "ghl", "gohighlevel", "h_level"):
         if key in datasources and isinstance(datasources[key], dict):
             canon = _INTEGRATION_ALIASES.get(key, key)
             if canon not in seen:
@@ -263,6 +269,26 @@ def resolve_config(
             logger.debug(f"appsflyer: no api_key for {client_name}")
             return None
         creds = {"api_key": api_key, "app_id": app_id}
+
+    elif platform == "ghl":
+        api_key = (
+            raw_config.get("api_key")
+            or raw_config.get("pit_key")
+            or os.environ.get("GHL_API_KEY", "")
+        )
+        loc_id = (
+            raw_config.get("location_id")
+            or raw_config.get("locationId")
+            or os.environ.get("GHL_LOCATION_ID", "")
+        )
+        if not api_key:
+            logger.debug(f"ghl: no api_key for {client_name}")
+            return None
+        if not loc_id:
+            logger.debug(f"ghl: no location_id for {client_name}")
+            return None
+        creds = {"api_key": api_key, "location_id": loc_id}
+        account_id = loc_id[:8]
 
     else:
         logger.debug(f"No resolver for platform: {platform}")

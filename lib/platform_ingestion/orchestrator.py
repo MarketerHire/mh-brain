@@ -16,6 +16,7 @@ from .adapters.meta_ads import MetaAdsAdapter
 from .adapters.klaviyo import KlaviyoAdapter
 from .adapters.hubspot import HubSpotAdapter
 from .adapters.shopify import ShopifyAdapter
+from .adapters.ghl import GoHighLevelAdapter
 from .adapters.generic import (
     BrazeAdapter, IterableAdapter, BeehiivAdapter,
     TripleWhaleAdapter, AmplitudeAdapter, CustomerIOAdapter, AppsFlyerAdapter,
@@ -38,6 +39,7 @@ _ADAPTERS: Dict[str, BasePlatformAdapter] = {
     "amplitude": AmplitudeAdapter(),
     "customerio": CustomerIOAdapter(),
     "appsflyer": AppsFlyerAdapter(),
+    "ghl": GoHighLevelAdapter(),
 }
 
 # Platforms that need rate-limit staggering
@@ -63,6 +65,7 @@ _PLATFORM_LABELS: Dict[str, str] = {
     "tiktok_ads": "TikTokAds",
     "ga4": "GA4",
     "polar_analytics": "PolarAnalytics",
+    "ghl": "GoHighLevel",
 }
 
 # Domain mapping for BrightMatter episodes
@@ -79,6 +82,7 @@ _PLATFORM_DOMAINS: Dict[str, str] = {
     "amplitude": "product_analytics",
     "customerio": "lifecycle",
     "appsflyer": "mobile",
+    "ghl": "crm",
 }
 
 
@@ -501,6 +505,8 @@ def _primary_metric(platform: str, metrics: Dict[str, Any]) -> Optional[float]:
     elif platform in ("shopify", "triple_whale"):
         return metrics.get("revenue")
     elif platform == "hubspot":
+        return metrics.get("contacts_created")
+    elif platform == "ghl":
         return metrics.get("contacts_created")
     elif platform in ("amplitude",):
         return metrics.get("active_users")
