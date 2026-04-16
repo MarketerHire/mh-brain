@@ -36,6 +36,7 @@ class CheckpointProcessor:
         self._bridge = bridge
         self._firebase = firebase_client
         self._supabase = supabase_client
+        self._mhos_supabase = None
 
     @property
     def supabase(self):
@@ -46,6 +47,17 @@ class CheckpointProcessor:
             except Exception:
                 pass
         return self._supabase
+
+    @property
+    def mhos_supabase(self):
+        """MH-OS Supabase for reading shared event bus tables."""
+        if self._mhos_supabase is None:
+            try:
+                from lib.supabase_client import get_mhos_supabase_or_none
+                self._mhos_supabase = get_mhos_supabase_or_none()
+            except Exception:
+                pass
+        return self._mhos_supabase
 
     def process_all_due(self) -> Dict[str, Any]:
         """Process all due checkpoints. Called by cron."""
@@ -294,12 +306,12 @@ class CheckpointProcessor:
         start_date: str,
         end_date: str,
     ) -> Optional[List[Dict[str, Any]]]:
-        """Query Supabase for MH-OS severity signals that overlap this window."""
-        if not self.supabase:
+        """Query MH-OS Supabase for severity signals that overlap this window."""
+        if not self.mhos_supabase:
             return None
         try:
             result = (
-                self.supabase.table("events")
+                self.mhos_supabase.table("events")
                 .select("result, metrics, context, created_at")
                 .eq("source", "mh-os")
                 .eq("event_type", "signal")
@@ -326,8 +338,8 @@ class CheckpointProcessor:
             return None
 
     def _query_mh1hq(self, delivery: Dict[str, Any]) -> Optional[Dict]:
-        """Query Supabase events table for MH1HQ skill execution results."""
-        if not self.supabase:
+        """Query MH-OS events table for MH1HQ skill execution results."""
+        if not self.mhos_supabase:
             return None
         try:
             skill_run_id = delivery.get("skill_run_id", "")
@@ -335,7 +347,7 @@ class CheckpointProcessor:
             client_id = delivery.get("client_id", "")
 
             query = (
-                self.supabase.table("events")
+                self.mhos_supabase.table("events")
                 .select("result, metrics, context")
                 .eq("source", "mh1-hq")
                 .eq("event_type", "skill_completed")
@@ -371,7 +383,7 @@ class CheckpointProcessor:
             ad_set_id = delivery.get("ad_set_id", "")
 
             result = (
-                self.supabase.table("events")
+                self.mhos_supabase.table("events")
                 .select("result, metrics")
                 .eq("event_type", "platform_metrics")
                 .order("created_at", desc=True)
@@ -392,8 +404,8 @@ class CheckpointProcessor:
             return None
 
     def _check_report(self, delivery: Dict[str, Any]) -> Optional[Dict]:
-        """Query Supabase for report engagement events."""
-        if not self.supabase:
+        """Query MH-OS Supabase for report engagement events."""
+        if not self.mhos_supabase:
             return None
         try:
             report_url = delivery.get("report_url", "")
@@ -401,7 +413,7 @@ class CheckpointProcessor:
                 return None
 
             result = (
-                self.supabase.table("events")
+                self.mhos_supabase.table("events")
                 .select("event_type, result, metrics, created_at")
                 .in_("event_type", ["report_viewed", "report_shared", "report_feedback"])
                 .order("created_at", desc=True)

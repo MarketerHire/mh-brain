@@ -513,8 +513,9 @@ async def query_patterns(req: PatternQuery):
 @app.get("/api/v1/kc/overview")
 async def kc_overview():
     """Aggregate stats for the knowledge center overview page."""
-    from lib.supabase_client import get_supabase
+    from lib.supabase_client import get_supabase, get_mhos_supabase
     db = get_supabase()
+    mhos_db = get_mhos_supabase()
 
     ep_total = db.table("episodic_memory").select("episode_id", count="exact").limit(0).execute()
     pat_res = db.table("semantic_patterns").select(
@@ -549,12 +550,12 @@ async def kc_overview():
     except Exception:
         ref_count = 0
     try:
-        sig_res = db.table("signals").select("id", count="exact").limit(0).execute()
+        sig_res = mhos_db.table("signals").select("id", count="exact").limit(0).execute()
         sig_count = sig_res.count or 0
     except Exception:
         sig_count = 0
     try:
-        ev_res = db.table("events").select("id", count="exact").limit(0).execute()
+        ev_res = mhos_db.table("events").select("id", count="exact").limit(0).execute()
         ev_count = ev_res.count or 0
     except Exception:
         ev_count = 0
@@ -580,7 +581,7 @@ async def kc_overview():
     avg_conf = sum(p.get("confidence") or 0 for p in patterns) / len(patterns) if patterns else 0
 
     try:
-        mhos_events = db.table("events").select(
+        mhos_events = mhos_db.table("events").select(
             "source,event_type,skill_name,created_at"
         ).order("created_at", desc=True).limit(10).execute()
     except Exception:
@@ -820,8 +821,9 @@ async def kc_connections():
 @app.get("/api/v1/dashboard/data")
 async def dashboard_data():
     """Public endpoint — returns live stats for the dashboard UI."""
-    from lib.supabase_client import get_supabase
+    from lib.supabase_client import get_supabase, get_mhos_supabase
     db = get_supabase()
+    mhos_db = get_mhos_supabase()
 
     ep_res = db.table("episodic_memory").select(
         "episode_id,skill_name,domain,weight,prediction_error,created_at,"
@@ -846,8 +848,8 @@ async def dashboard_data():
     wm_res = db.table("bm_watermarks").select("*").execute()
     watermarks = wm_res.data or []
 
-    sig_res = db.table("signals").select("id", count="exact").limit(0).execute()
-    ev_res = db.table("events").select("id", count="exact").limit(0).execute()
+    sig_res = mhos_db.table("signals").select("id", count="exact").limit(0).execute()
+    ev_res = mhos_db.table("events").select("id", count="exact").limit(0).execute()
 
     all_skills: Dict[str, int] = {}
     domain_dist: Dict[str, int] = {}
@@ -883,13 +885,14 @@ async def dashboard_data():
 @app.get("/api/v1/dashboard/feed")
 async def dashboard_feed(limit: int = 80):
     """Returns a unified chronological activity feed in human language."""
-    from lib.supabase_client import get_supabase
+    from lib.supabase_client import get_supabase, get_mhos_supabase
     db = get_supabase()
+    mhos_db = get_mhos_supabase()
 
     feed: List[Dict[str, Any]] = []
 
     # ── Events (from MH-OS, Jarvis, etc.) ──
-    ev_res = db.table("events").select(
+    ev_res = mhos_db.table("events").select(
         "id,source,event_type,skill_name,client_id,domain,result,context,metrics,created_at"
     ).order("created_at", desc=True).limit(40).execute()
     for e in (ev_res.data or []):
@@ -1095,7 +1098,7 @@ async def dashboard_feed(limit: int = 80):
         })
 
     # ── Signals ──
-    sig_res = db.table("signals").select(
+    sig_res = mhos_db.table("signals").select(
         "id,date,source,lever,summary,created_at"
     ).order("created_at", desc=True).limit(15).execute()
     for s in (sig_res.data or []):
