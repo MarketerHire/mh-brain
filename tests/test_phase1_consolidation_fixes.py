@@ -100,10 +100,11 @@ def test_a1_doc_to_episode_coerces_unknown_domain_to_generic(
     fb = fake_firebase_factory()
     store = EpisodicMemoryStore(firebase_client=fb, config=EpisodicMemoryConfig())
 
-    # Platform ingestion writes custom domain strings (e.g. "paid_media",
-    # "email") that are NOT members of the Domain enum. A1 must tolerate
-    # these without raising.
-    doc = _platform_doc(domain="paid_media")
+    # Legacy / truly unknown domain strings that aren't in Domain AND
+    # aren't recognised by normalize_domain must degrade to GENERIC
+    # instead of raising. (After Phase 2, "paid_media" and friends are
+    # mapped to their proper enum value — see the Phase 2 tests.)
+    doc = _platform_doc(domain="some-domain-we-never-heard-of")
 
     episode = store._doc_to_episode(doc)
 
@@ -330,12 +331,15 @@ def test_phase1_integration_platform_ingestion_consolidation_no_crash(
     semantic = SemanticMemoryStore(firebase_client=fb, config=SemanticMemoryConfig())
 
     # Simulate a batch of platform-ingestion-shaped rows in Supabase.
+    # The original crash happened regardless of what domain was used;
+    # a legacy alias like "paid_media" lets us also exercise the Phase 2
+    # alias → enum path at the same time.
     raw_docs = [
         _platform_doc(
             episode_id=f"pi-{i}",
             skill_name="platform-daily:GoogleAds-acme",
             tenant_id="acme",
-            domain="paid_media",  # unknown domain — must not crash
+            domain="paid_media",
         )
         for i in range(5)
     ]
@@ -348,9 +352,10 @@ def test_phase1_integration_platform_ingestion_consolidation_no_crash(
     pattern = semantic.consolidate_from_episodes(episodes)
     assert pattern is not None, "Consolidation should succeed"
     assert pattern.skill_name == "platform-daily:GoogleAds-acme"
-    # Unknown platform domain was coerced to GENERIC in _doc_to_episode, so
-    # the consolidated pattern carries the safe fallback.
-    assert pattern.domain == Domain.GENERIC
+    # Phase 2: "paid_media" is a known alias for CAMPAIGN, so it no
+    # longer degrades to GENERIC. The point of the regression test is
+    # that consolidation does not raise — the enum value is secondary.
+    assert pattern.domain == Domain.CAMPAIGN
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -386,16 +391,4 @@ def test_phase1_fix_3_pending_outcomes_in_table_map():
     assert _PK_MAP["pending_outcomes"] == "prediction_id"
 
 
-# ────────────────────────────────────────────────────────────────────────
-# Fixtures
-# ────────────────────────────────────────────────────────────────────────
-
-
-@pytest.fixture
-def fake_firebase_factory():
-    from tests.conftest import FakeFirebase
-
-    def _factory():
-        return FakeFirebase()
-
-    return _factory
+# Shared fixture lives in tests/conftest.py

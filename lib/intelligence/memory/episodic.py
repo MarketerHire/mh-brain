@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from ..types import Domain, EpisodicMemory, Prediction, Outcome
+from ..types import Domain, EpisodicMemory, Prediction, Outcome, normalize_domain
 
 logger = logging.getLogger(__name__)
 
@@ -600,22 +600,18 @@ class EpisodicMemoryStore:
                 prediction.tenant_id = doc.get("tenant_id", "")
 
             # Only override domain when the JSONB blob didn't provide one.
-            # Coerce unknown / legacy domain strings (e.g. "paid_media" from
-            # platform_ingestion) down to GENERIC rather than crashing; the
-            # write-side will be normalized separately so new episodes carry
-            # a valid Domain value.
+            # ``Prediction.from_dict`` (via ``normalize_domain``) already
+            # coerces unknown / legacy strings (e.g. "paid_media" from
+            # platform_ingestion) to an enum value, but when the JSONB is
+            # empty we still want to consult the top-level column so the
+            # episode retains its original platform categorisation.
             jsonb_domain = prediction_data.get("domain") if isinstance(prediction_data, dict) else None
             if jsonb_domain in (None, ""):
                 doc_domain = doc.get("domain")
                 if doc_domain:
-                    try:
-                        prediction.domain = Domain(doc_domain)
-                    except (ValueError, KeyError):
-                        logger.debug(
-                            "Unknown domain '%s' on episode %s; coercing to GENERIC",
-                            doc_domain, episode_id,
-                        )
-                        prediction.domain = Domain.GENERIC
+                    prediction.domain = normalize_domain(
+                        doc_domain, default=Domain.GENERIC
+                    )
 
             # Reconstruct Outcome
             outcome_data = doc.get("outcome", {})

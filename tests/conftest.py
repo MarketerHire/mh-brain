@@ -14,6 +14,8 @@ from __future__ import annotations
 import copy
 from typing import Any, Dict, List, Optional, Tuple
 
+import pytest
+
 
 class FakeFirebase:
     """In-memory Firebase / Supabase-style adapter used in tests."""
@@ -129,3 +131,13 @@ def _matches(value: Any, op: str, target: Any) -> bool:
     if op == "in":
         return value in (target or [])
     return True
+
+
+@pytest.fixture
+def fake_firebase_factory():
+    """Return a factory that instantiates a fresh FakeFirebase per test."""
+
+    def _factory() -> FakeFirebase:
+        return FakeFirebase()
+
+    return _factory

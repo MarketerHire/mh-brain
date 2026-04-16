@@ -28,6 +28,79 @@ class Domain(Enum):
     GENERIC = "generic"         # Fallback domain
 
 
+# Aliases from platform-ingestion / legacy domain strings to the canonical
+# Domain enum. Consumers should call ``normalize_domain(raw)`` rather than
+# ``Domain(raw)`` so unexpected strings become GENERIC instead of raising.
+_DOMAIN_ALIASES: Dict[str, "Domain"] = {
+    # Platform ingestion writes these per lib/platform_ingestion/orchestrator.py
+    "paid_media": None,          # resolved below once Domain is available
+    "email": None,
+    "crm": None,
+    "ecommerce": None,
+    "lifecycle": None,
+    "product_analytics": None,
+    "mobile": None,
+    # Historical / internal aliases
+    "campaigns": None,
+    "engagement": None,
+    "sales": None,
+    "retention": None,
+    "churn": None,
+    "pipeline": None,
+    "growth": None,
+    "attribution": None,
+}
+
+
+def _init_domain_aliases() -> None:
+    _DOMAIN_ALIASES.update({
+        "paid_media": Domain.CAMPAIGN,
+        "email": Domain.CONTENT,
+        "crm": Domain.REVENUE,
+        "ecommerce": Domain.REVENUE,
+        "lifecycle": Domain.CONTENT,
+        "product_analytics": Domain.HEALTH,
+        "mobile": Domain.CAMPAIGN,
+        "campaigns": Domain.CAMPAIGN,
+        "engagement": Domain.CONTENT,
+        "sales": Domain.REVENUE,
+        "retention": Domain.HEALTH,
+        "churn": Domain.HEALTH,
+        "pipeline": Domain.REVENUE,
+        "growth": Domain.CONTENT,
+        "attribution": Domain.CAMPAIGN,
+    })
+
+
+_init_domain_aliases()
+
+
+def normalize_domain(value: Any, *, default: "Domain" = None) -> "Domain":
+    """Coerce any input into a valid ``Domain``.
+
+    Resolution order:
+      1. Already a ``Domain`` instance → return as-is.
+      2. Canonical enum value (``"content"``, ``"revenue"``, ...) → enum.
+      3. Platform / legacy alias → mapped enum (see ``_DOMAIN_ALIASES``).
+      4. Anything else → ``default`` (defaults to ``Domain.GENERIC``).
+
+    Never raises ``ValueError`` for unknown strings — the learning loop
+    cannot afford to crash on a single bad episode.
+    """
+    fallback = default if default is not None else Domain.GENERIC
+    if value is None or value == "":
+        return fallback
+    if isinstance(value, Domain):
+        return value
+    if isinstance(value, str):
+        try:
+            return Domain(value)
+        except ValueError:
+            pass
+        return _DOMAIN_ALIASES.get(value.lower(), fallback)
+    return fallback
+
+
 class EpisodeSource(Enum):
     """Origin of an episodic memory entry."""
     SKILL_EXECUTION = "skill"
@@ -78,12 +151,8 @@ class Prediction:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Prediction":
         """Reconstruct Prediction from dictionary."""
-        domain_value = data.get("domain", "generic")
-        if isinstance(domain_value, str):
-            domain = Domain(domain_value)
-        else:
-            domain = domain_value
-        
+        domain = normalize_domain(data.get("domain", "generic"))
+
         confidence_interval = data.get("confidence_interval", [0.0, 1.0])
         if isinstance(confidence_interval, list):
             confidence_interval = tuple(confidence_interval)
@@ -306,11 +375,7 @@ class SemanticPattern:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SemanticPattern":
         """Reconstruct SemanticPattern from dictionary."""
-        domain_value = data.get("domain", "generic")
-        if isinstance(domain_value, str):
-            domain = Domain(domain_value)
-        else:
-            domain = domain_value
+        domain = normalize_domain(data.get("domain", "generic"))
 
         trajectory = [
             TrajectoryPoint.from_dict(tp)
@@ -486,6 +551,7 @@ def validate_channel_context(
 __all__ = [
     "MemoryLayer",
     "Domain",
+    "normalize_domain",
     "EpisodeSource",
     "Prediction",
     "Outcome",
