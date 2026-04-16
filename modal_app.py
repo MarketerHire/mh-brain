@@ -47,7 +47,7 @@ _required_secrets = [
 ]
 
 _optional_secrets = []
-for _name in ("bm-bigquery", "bm-airtable", "mh1-firebase", "mh1-all", "bm-mcp-fmt", "bm-powerbi-mrchristmas"):
+for _name in ("bm-mhos-supabase", "bm-bigquery", "bm-airtable", "mh1-firebase", "mh1-all", "bm-mcp-fmt", "bm-powerbi-mrchristmas"):
     try:
         _optional_secrets.append(modal.Secret.from_name(_name, required_keys=[]))
     except Exception:
@@ -390,10 +390,18 @@ def health_check():
     try:
         from lib.supabase_client import get_supabase
         sb = get_supabase()
-        result = sb.table("events").select("id").limit(1).execute()
+        sb.table("episodic_memory").select("episode_id").limit(1).execute()
         status["supabase"] = True
-        status["supabase_events_accessible"] = True
     except Exception as e:
         status["supabase_error"] = str(e)
+
+    try:
+        from lib.supabase_client import get_mhos_supabase
+        mhos = get_mhos_supabase()
+        mhos.table("events").select("id").limit(1).execute()
+        status["mhos_supabase"] = True
+        status["supabase_events_accessible"] = True
+    except Exception as e:
+        status["mhos_supabase_error"] = str(e)
 
     return status

@@ -44,7 +44,11 @@ _supabase = None
 
 
 def _get_supabase():
-    """Lazy-load Supabase client."""
+    """Lazy-load Supabase client for MH-OS shared event bus.
+
+    Prefers MHOS_SUPABASE_URL/KEY (the shared project where events live),
+    falls back to SUPABASE_URL/KEY for backwards compatibility.
+    """
     global _supabase
     if _supabase is not None:
         return _supabase
@@ -55,12 +59,12 @@ def _get_supabase():
         logger.warning("supabase package not installed — event emission disabled")
         return None
 
-    url = os.environ.get("SUPABASE_URL", "")
-    key = os.environ.get(
+    url = os.environ.get("MHOS_SUPABASE_URL") or os.environ.get("SUPABASE_URL", "")
+    key = os.environ.get("MHOS_SUPABASE_KEY") or os.environ.get(
         "SUPABASE_KEY", os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
     )
     if not url or not key:
-        logger.debug("SUPABASE_URL/SUPABASE_KEY not set — event emission disabled")
+        logger.debug("Supabase credentials not set — event emission disabled")
         return None
 
     _supabase = create_client(url, key)

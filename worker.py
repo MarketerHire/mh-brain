@@ -65,6 +65,7 @@ class BrightMatterWorker:
         self.engine = IntelligenceEngine()
         self.bridge = IntelligenceBridge(engine=self.engine)
         self._supabase = None
+        self._mhos_supabase = None
 
     @property
     def supabase(self):
@@ -72,6 +73,14 @@ class BrightMatterWorker:
             from lib.supabase_client import get_supabase
             self._supabase = get_supabase()
         return self._supabase
+
+    @property
+    def mhos_supabase(self):
+        """MH-OS Supabase client for shared event bus (events, signals, transcripts)."""
+        if self._mhos_supabase is None:
+            from lib.supabase_client import get_mhos_supabase
+            self._mhos_supabase = get_mhos_supabase()
+        return self._mhos_supabase
 
     def run_cycle(self) -> Dict[str, Any]:
         """Run one full processing cycle with all three tiers."""
@@ -113,7 +122,7 @@ class BrightMatterWorker:
                     self._process_event(event)
                     stats["events_processed"] += 1
 
-                    self.supabase.table("events").update(
+                    self.mhos_supabase.table("events").update(
                         {"processed_by_bm": True}
                     ).eq("id", event["id"]).execute()
                 except Exception as e:
@@ -170,9 +179,9 @@ class BrightMatterWorker:
         return stats
 
     def _pull_new_events(self, limit: int = 500) -> List[Dict[str, Any]]:
-        """Pull unprocessed events from Supabase."""
+        """Pull unprocessed events from MH-OS shared event bus."""
         result = (
-            self.supabase.table("events")
+            self.mhos_supabase.table("events")
             .select("*")
             .eq("processed_by_bm", False)
             .order("created_at")
@@ -393,7 +402,7 @@ class BrightMatterWorker:
         last_ts = watermark.get("last_processed_at") if watermark else None
 
         query = (
-            self.supabase.table("signals")
+            self.mhos_supabase.table("signals")
             .select("*")
             .order("created_at", desc=False)
             .limit(limit)
@@ -1072,7 +1081,7 @@ class BrightMatterWorker:
         last_ts = watermark.get("last_processed_at") if watermark else None
 
         query = (
-            self.supabase.table("transcripts")
+            self.mhos_supabase.table("transcripts")
             .select("*")
             .order("processed_at", desc=False)
             .limit(50)
@@ -1535,10 +1544,10 @@ class BrightMatterWorker:
         return refreshed
 
     def _get_active_skill_client_pairs(self) -> List[tuple]:
-        """Get recently active (skill_name, client_id) pairs from events."""
+        """Get recently active (skill_name, client_id) pairs from MH-OS events."""
         try:
             result = (
-                self.supabase.rpc(
+                self.mhos_supabase.rpc(
                     "get_active_pairs",
                     {"lookback_days": 30},
                 ).execute()
@@ -1551,7 +1560,7 @@ class BrightMatterWorker:
         # Fallback: query events directly
         try:
             result = (
-                self.supabase.table("events")
+                self.mhos_supabase.table("events")
                 .select("skill_name, client_id")
                 .neq("skill_name", None)
                 .order("created_at", desc=True)
