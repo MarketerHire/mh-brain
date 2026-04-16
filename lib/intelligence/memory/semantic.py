@@ -171,7 +171,88 @@ class SemanticMemoryStore:
             
             logger.debug(f"Stored pattern {pattern.pattern_id} at {collection_path}")
             return pattern.pattern_id
-    
+
+    def _persist_pattern(
+        self,
+        pattern: SemanticPattern,
+        tenant_id: str = "",
+    ) -> str:
+        """
+        Persist an updated pattern, tracking tenant_ids across calls.
+
+        Used by the consolidation manager after mutating a pattern in
+        place (trajectory updates, instant-fail demotions). Unlike
+        ``store()``, this method:
+
+          1. Refreshes ``pattern.updated_at`` so decay math is correct.
+          2. Reads the existing doc (if any) to preserve and union the
+             ``tenant_ids`` list — the pattern dataclass itself does not
+             carry per-tenant scope, but the Firebase/Supabase doc does.
+          3. Writes via ``set_document`` with the merged ``tenant_ids``.
+
+        Empty ``tenant_id`` (used by global/cross-tenant demotions)
+        is treated as "applies to all tenants" and does not add to the
+        tenant_ids list.
+
+        Args:
+            pattern: The SemanticPattern to persist. Mutated in place.
+            tenant_id: Optional tenant scope to associate with this
+                update. Empty string means cross-tenant / global.
+
+        Returns:
+            The pattern_id (same as ``pattern.pattern_id``).
+        """
+        with self._lock:
+            if not pattern.skill_name:
+                raise ValueError("Pattern must have skill_name")
+
+            pattern.updated_at = datetime.now(timezone.utc).isoformat()
+
+            collection_path = self._get_collection_path(pattern.domain)
+            doc_data = pattern.to_dict()
+
+            existing_tenant_ids: List[str] = []
+            if hasattr(self._firebase, "get_document"):
+                try:
+                    existing = self._firebase.get_document(
+                        collection=collection_path,
+                        doc_id=pattern.pattern_id,
+                    )
+                    if existing and isinstance(existing.get("tenant_ids"), list):
+                        existing_tenant_ids = [
+                            t for t in existing["tenant_ids"] if isinstance(t, str)
+                        ]
+                except Exception as e:
+                    logger.debug(
+                        f"_persist_pattern: get_document failed for "
+                        f"{pattern.pattern_id}: {e}"
+                    )
+
+            tenant_ids = list(existing_tenant_ids)
+            if tenant_id and tenant_id not in tenant_ids:
+                tenant_ids.append(tenant_id)
+            doc_data["tenant_ids"] = tenant_ids
+
+            doc_data.setdefault("last_reinforced_at", pattern.updated_at)
+
+            if hasattr(self._firebase, "set_document"):
+                self._firebase.set_document(
+                    collection=collection_path,
+                    doc_id=pattern.pattern_id,
+                    data=doc_data,
+                )
+            else:
+                logger.warning(
+                    "_persist_pattern: firebase client missing set_document"
+                )
+                raise AttributeError("firebase_client missing set_document method")
+
+            logger.debug(
+                f"Persisted pattern {pattern.pattern_id} "
+                f"(tenant_ids={len(tenant_ids)}) at {collection_path}"
+            )
+            return pattern.pattern_id
+
     def retrieve_patterns(
         self,
         skill_name: str,

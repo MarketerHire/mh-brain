@@ -182,8 +182,19 @@ class BrightMatterWorker:
         return result.data or []
 
     def _process_event(self, event: Dict[str, Any]):
-        """Route event to appropriate handler."""
+        """Route event to appropriate handler, with idempotency checks."""
         event_type = event.get("event_type", "")
+        event_id = event.get("id") or ""
+
+        # Idempotency: if this event was already represented in episodic
+        # memory (keyed by `_event_id` in outcome.metadata), skip it.
+        # Events are supposed to be marked `processed_by_bm=True` after
+        # processing, but a retry after a crash can re-deliver the same
+        # row before the flag flips. Without this guard we'd double-
+        # count signals and double-score predictions.
+        if event_id and self._event_already_processed(event_id):
+            logger.info(f"Skipping already-processed event {event_id}")
+            return
 
         if event_type == "signal":
             self._process_signal(event)
@@ -198,6 +209,45 @@ class BrightMatterWorker:
         else:
             logger.warning(f"Unknown event_type: {event_type}")
 
+    def _event_already_processed(self, event_id: str) -> bool:
+        """Return True when we've already written an episode for this event.
+
+        Looks up ``episodic_memory`` rows whose ``outcome->>'_event_id'``
+        JSONB field matches ``event_id``. Failures are treated as
+        "unknown" so we err on the side of processing — ``processed_by_bm``
+        is a belt-and-suspenders second guard.
+        """
+        if not event_id:
+            return False
+        try:
+            result = (
+                self.supabase.table("episodic_memory")
+                .select("episode_id")
+                .filter("outcome->metadata->>_event_id", "eq", event_id)
+                .limit(1)
+                .execute()
+            )
+            if result.data:
+                return True
+        except Exception as e:
+            logger.debug(f"dedup lookup failed for {event_id}: {e}")
+
+        # Legacy rows written before Phase 2 stored metrics at
+        # outcome.metrics (not outcome.metadata). Accept either shape
+        # so we don't double-process events straddling the migration.
+        try:
+            result = (
+                self.supabase.table("episodic_memory")
+                .select("episode_id")
+                .filter("outcome->>_event_id", "eq", event_id)
+                .limit(1)
+                .execute()
+            )
+            return bool(result.data)
+        except Exception as e:
+            logger.debug(f"legacy dedup lookup failed for {event_id}: {e}")
+            return False
+
     def _process_signal(self, event: Dict[str, Any]):
         """Convert a signal event (e.g., from MH-OS) into an episode.
 
@@ -205,17 +255,12 @@ class BrightMatterWorker:
         and the Learner to update patterns after storing.
         """
         from lib.intelligence.types import (
-            Domain, EpisodicMemory, Prediction, Outcome, EpisodeSource,
+            EpisodicMemory, Prediction, Outcome, EpisodeSource, normalize_domain,
         )
 
         skill_name = event.get("skill_name") or event.get("source", "signal")
         client_id = event.get("client_id", "unknown")
-        domain_str = event.get("domain", "generic")
-
-        try:
-            domain = Domain(domain_str)
-        except ValueError:
-            domain = Domain.GENERIC
+        domain = normalize_domain(event.get("domain"))
 
         metrics = event.get("metrics", {})
         context = event.get("context", {})
@@ -272,12 +317,49 @@ class BrightMatterWorker:
                 logger.debug(f"Signal learner update failed: {e}")
 
     def _process_skill_completion(self, event: Dict[str, Any]):
-        """Process a completed skill execution event."""
+        """Process a completed skill execution event.
+
+        Two modes, decided by whether the event carries a ``tracking_id``:
+
+        1. **Close-the-loop mode** (preferred): the upstream system
+           registered a prediction via ``start_tracking`` when the skill
+           began. The ``tracking_id`` is included on the completion event.
+           We resolve that prediction with real outcomes — which is what
+           the learning loop needs to update patterns. Never create a
+           duplicate tracking cycle in this path.
+
+        2. **Backfill mode**: no ``tracking_id`` present (e.g. legacy
+           completions, events from systems that don't integrate with
+           the bridge). Register a fresh prediction and immediately
+           close it as deferred so we at least get an episode on disk.
+        """
         skill_name = event.get("skill_name", "")
         client_id = event.get("client_id", "")
         result = event.get("result", {})
         metrics = event.get("metrics", {})
         context = event.get("context", {})
+        tracking_id = (
+            event.get("tracking_id")
+            or (event.get("result") or {}).get("tracking_id")
+            or (event.get("metrics") or {}).get("tracking_id")
+            or ""
+        )
+
+        if tracking_id and tracking_id in self.bridge._tracking:
+            # Close-the-loop: resolve the already-registered prediction.
+            self.bridge.complete_tracking(
+                tracking_id=tracking_id,
+                result=result,
+                metrics=metrics,
+                deferred=True,
+            )
+            return
+
+        if tracking_id:
+            logger.debug(
+                f"tracking_id {tracking_id} on event {event.get('id')} "
+                "not registered with bridge — falling back to backfill mode"
+            )
 
         guidance = self.bridge.get_skill_guidance(
             skill_name=skill_name,
@@ -285,7 +367,7 @@ class BrightMatterWorker:
             inputs=context,
         )
 
-        tracking_id = self.bridge.start_tracking(
+        new_tracking_id = self.bridge.start_tracking(
             skill_name=skill_name,
             client_id=client_id,
             guidance=guidance,
@@ -293,7 +375,7 @@ class BrightMatterWorker:
         )
 
         self.bridge.complete_tracking(
-            tracking_id=tracking_id,
+            tracking_id=new_tracking_id,
             result=result,
             metrics=metrics,
             deferred=True,
@@ -331,20 +413,14 @@ class BrightMatterWorker:
         this is the strongest signal about what the right answer looks like.
         """
         from lib.intelligence.types import (
-            Domain, EpisodicMemory, Prediction, Outcome, EpisodeSource,
+            EpisodicMemory, Prediction, Outcome, EpisodeSource, normalize_domain,
         )
-        import uuid
 
         skill_name = event.get("skill_name", "")
         client_id = event.get("client_id", "")
         result = event.get("result", {})
         context = event.get("context", {})
-        domain_str = event.get("domain", "generic")
-
-        try:
-            domain = Domain(domain_str)
-        except ValueError:
-            domain = Domain.GENERIC
+        domain = normalize_domain(event.get("domain"))
 
         prediction = Prediction(
             prediction_id=str(uuid.uuid4())[:12],

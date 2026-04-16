@@ -17,12 +17,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from ..types import Domain, SemanticPattern, ProceduralKnowledge
+from ..types import Domain, SemanticPattern, ProceduralKnowledge, EpisodicMemory
 from ..adapters.channels import get_channel_config, ChannelConfig
 
 if TYPE_CHECKING:
     from ..memory.semantic import SemanticMemoryStore
     from ..memory.procedural import ProceduralMemoryStore
+    from ..memory.episodic import EpisodicMemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -135,18 +136,24 @@ class Predictor:
         self,
         semantic_store: "SemanticMemoryStore",
         procedural_store: "ProceduralMemoryStore",
-        config: Optional[ExplorationConfig] = None
+        config: Optional[ExplorationConfig] = None,
+        episodic_store: Optional["EpisodicMemoryStore"] = None,
     ):
         """
         Initialize the predictor.
-        
+
         Args:
             semantic_store: Store for skill-specific learned patterns
             procedural_store: Store for cross-skill procedural knowledge
             config: Exploration/exploitation configuration
+            episodic_store: Optional store for raw past episodes. When
+                provided, the predictor can supplement pattern-based
+                reasoning with recent real-world observations
+                (``_recent_episodes`` metadata on Guidance).
         """
         self._semantic_store = semantic_store
         self._procedural_store = procedural_store
+        self._episodic_store = episodic_store
         self._config = config or ExplorationConfig()
     
     def get_guidance(
@@ -187,14 +194,21 @@ class Predictor:
         
         # Step 2: Get procedural knowledge for this skill/domain
         procedural = self._retrieve_procedural(skill_name, domain)
-        
+
+        # Step 2A: Pull recent episodes (if an episodic store is wired in)
+        # so we can surface real observed outcomes alongside pattern-based
+        # predictions. This closes the loop between what the semantic
+        # patterns *expect* and what episodes actually reported.
+        episodes = self._retrieve_episodes(skill_name, tenant_id, domain)
+        episode_stats = self._summarize_episodes(episodes)
+
         # Step 2.5: If Phase 0 data is available, adjust default parameters
         # to reflect actual data state (e.g., set segment_count based on
         # actual lifecycle distribution, thresholds based on real churn rate).
         phase0_adjustments = self._phase0_parameter_adjustments(
             skill_name, domain, context
         )
-        
+
         # Step 3: Decide explore or exploit
         should_explore, reason = self._should_explore(patterns, context)
         
@@ -215,6 +229,34 @@ class Predictor:
             # Phase 0 data increases confidence since we have real data
             guidance.confidence = min(1.0, guidance.confidence + 0.1)
             guidance.uncertainty = max(0.0, guidance.uncertainty - 0.1)
+
+        # Step 5.5: Attach episodic evidence to guidance metadata so
+        # downstream consumers (and the learning loop) can compare the
+        # pattern-based prediction against real recent outcomes.
+        if episode_stats:
+            guidance.metadata["recent_episodes"] = episode_stats
+            # When episodes disagree sharply with the pattern prediction,
+            # widen uncertainty a little so the confidence score reflects
+            # the conflict. We never *narrow* uncertainty here — only the
+            # full learning loop (Learner) has permission to do that.
+            pattern_ev = guidance.pattern_expected_value
+            mean_ratio = episode_stats.get("mean_signal_ratio")
+            if (
+                pattern_ev is not None
+                and mean_ratio is not None
+                and pattern_ev > 0
+            ):
+                divergence = abs(mean_ratio - pattern_ev) / max(pattern_ev, 1e-6)
+                if divergence > 0.5:
+                    bump = min(0.2, divergence * 0.1)
+                    guidance.uncertainty = min(1.0, guidance.uncertainty + bump)
+                    guidance.confidence = max(0.0, guidance.confidence - bump)
+                    guidance.metadata.setdefault("episodic_divergence", {})
+                    guidance.metadata["episodic_divergence"].update({
+                        "pattern_expected_value": pattern_ev,
+                        "observed_mean_ratio": mean_ratio,
+                        "divergence": divergence,
+                    })
 
         # Step 6: Enrich with reference knowledge (expert frameworks, tactics)
         try:
@@ -272,6 +314,99 @@ class Predictor:
             logger.warning(f"Failed to retrieve patterns: {e}")
         return []
     
+    def _retrieve_episodes(
+        self,
+        skill_name: str,
+        tenant_id: str,
+        domain: Domain,
+        limit: int = 20,
+    ) -> List["EpisodicMemory"]:
+        """Pull recent episodes for this skill/tenant/domain.
+
+        Returns an empty list if no episodic store is wired, the store
+        has no matching rows, or retrieval errors out — the predictor
+        must never fail because the episodic layer is missing or slow.
+        """
+        if self._episodic_store is None:
+            return []
+        try:
+            episodes = self._episodic_store.retrieve(
+                tenant_id=tenant_id,
+                skill_name=skill_name,
+                domain=domain,
+                limit=limit,
+            )
+            return episodes or []
+        except Exception as e:
+            logger.debug(f"Episodic retrieve skipped: {e}")
+            return []
+
+    @staticmethod
+    def _summarize_episodes(
+        episodes: List["EpisodicMemory"],
+    ) -> Dict[str, Any]:
+        """Collapse a list of episodes into a small metadata dict.
+
+        Returns keys:
+          - ``count``: number of episodes summarised
+          - ``mean_observed_signal``: arithmetic mean of observed_signal
+          - ``mean_signal_ratio``: observed_signal / observed_baseline,
+            averaged across episodes with non-zero baseline
+          - ``goal_completion_rate``: fraction where goal_completed=True
+          - ``last_observed_at``: most recent created_at timestamp
+          - ``episode_ids``: top N ids (truncated) for traceability
+        """
+        if not episodes:
+            return {}
+
+        signals: List[float] = []
+        ratios: List[float] = []
+        goals: List[bool] = []
+        timestamps: List[str] = []
+        ids: List[str] = []
+
+        for ep in episodes:
+            outcome = getattr(ep, "outcome", None)
+            if outcome is None:
+                continue
+            raw_signal = getattr(outcome, "observed_signal", None)
+            raw_baseline = getattr(outcome, "observed_baseline", None)
+
+            if isinstance(raw_signal, (int, float)):
+                signals.append(float(raw_signal))
+                if isinstance(raw_baseline, (int, float)) and raw_baseline > 0:
+                    ratios.append(float(raw_signal) / float(raw_baseline))
+
+            goal = getattr(outcome, "goal_completed", None)
+            if isinstance(goal, bool):
+                goals.append(goal)
+
+            ts = getattr(ep, "created_at", "") or ""
+            if ts:
+                timestamps.append(ts)
+            eid = getattr(ep, "episode_id", "") or ""
+            if eid:
+                ids.append(eid)
+
+        if not signals and not goals:
+            return {}
+
+        summary: Dict[str, Any] = {"count": len(episodes)}
+        if signals:
+            summary["mean_observed_signal"] = sum(signals) / len(signals)
+        if ratios:
+            summary["mean_signal_ratio"] = sum(ratios) / len(ratios)
+        if goals:
+            summary["goal_completion_rate"] = sum(
+                1 for g in goals if g
+            ) / len(goals)
+        if timestamps:
+            summary["last_observed_at"] = max(timestamps)
+        if ids:
+            summary["episode_ids"] = ids[:10]
+
+        return summary
+
     def _retrieve_procedural(
         self,
         skill_name: str,

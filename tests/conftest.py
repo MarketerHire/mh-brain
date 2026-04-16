@@ -92,10 +92,10 @@ class FakeFirebase:
         rows = [copy.deepcopy(v) for v in self._bucket(collection).values()]
         for f in filters or []:
             field, op, value = f
-            rows = [r for r in rows if _matches(r.get(field), op, value)]
+            rows = [r for r in rows if _matches(_get_nested(r, field), op, value)]
         if order_by:
             rows.sort(
-                key=lambda r: r.get(order_by, 0),
+                key=lambda r: _get_nested(r, order_by) or 0,
                 reverse=(order_direction or "").upper().startswith("DESC"),
             )
         if limit:
@@ -113,6 +113,25 @@ class FakeFirebase:
                 if head:
                     subs.add(head)
         return sorted(subs)
+
+
+def _get_nested(doc: Any, field: str) -> Any:
+    """Resolve dotted paths (``prediction.domain``) against a nested dict.
+
+    Firestore-style queries use dotted field paths to reach into nested
+    maps. The real Firestore engine handles this transparently; our
+    in-memory fake needs to mimic that behaviour or tests can't exercise
+    the actual query predicates emitted by the stores.
+    """
+    if not isinstance(field, str) or not field:
+        return None
+    current: Any = doc
+    for part in field.split("."):
+        if isinstance(current, dict):
+            current = current.get(part)
+        else:
+            return None
+    return current
 
 
 def _matches(value: Any, op: str, target: Any) -> bool:
