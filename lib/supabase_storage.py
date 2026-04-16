@@ -35,6 +35,7 @@ _TABLE_MAP = {
     "system/intelligence/procedural": "procedural_knowledge",
     "system/intelligence/working_memory/predictions": "working_predictions",
     "system/intelligence/working_predictions": "working_predictions",
+    "system/intelligence/pending_outcomes": "pending_outcomes",
     "system/intelligence/shadow_state": "shadow_state",
     "system/intelligence/shadow_history": "shadow_history",
     "system/intelligence/accuracy_reports": "accuracy_reports",
@@ -49,6 +50,7 @@ _PK_MAP = {
     "semantic_patterns": "pattern_id",
     "procedural_knowledge": "knowledge_id",
     "working_predictions": "prediction_id",
+    "pending_outcomes": "prediction_id",
 }
 
 
@@ -75,11 +77,12 @@ class SupabaseStorage:
 
     @staticmethod
     def _extract_filters(collection_path: str) -> Dict[str, str]:
-        """Extract tenant_id / skill_name / domain from Firebase-style paths.
+        """Extract tenant_id / skill_name / domain / client_id from Firebase-style paths.
 
-        Episodic:  system/intelligence/episodic/{tenant}/{skill}
-        Archive:   system/intelligence/archive/{tenant}/{skill}
-        Semantic:  system/intelligence/semantic/{domain}/patterns
+        Episodic:         system/intelligence/episodic/{tenant}/{skill}
+        Archive:          system/intelligence/archive/{tenant}/{skill}
+        Semantic:         system/intelligence/semantic/{domain}/patterns
+        Pending outcomes: system/intelligence/pending_outcomes/{client_id}
         """
         path = collection_path.rstrip("/")
         filters: Dict[str, str] = {}
@@ -97,6 +100,13 @@ class SupabaseStorage:
             parts = path[len("system/intelligence/semantic/"):].split("/")
             if len(parts) >= 1 and parts[0]:
                 filters["domain"] = parts[0]
+            return filters
+
+        if path.startswith("system/intelligence/pending_outcomes/"):
+            parts = path[len("system/intelligence/pending_outcomes/"):].split("/")
+            if len(parts) >= 1 and parts[0]:
+                filters["client_id"] = parts[0]
+            return filters
 
         return filters
 

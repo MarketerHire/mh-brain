@@ -355,6 +355,12 @@ class MemoryConsolidationManager:
                             stats["patterns_updated"] += result.get("updated", 0)
 
                     # Step 2E.2: Build trajectory from multi-checkpoint episodes
+                    # (optional — only applies to episodes that carry
+                    # checkpoint_day metadata, e.g. skill executions that go
+                    # through the 24h/7d deferred outcome loop. Platform
+                    # ingestion episodes have no checkpoints, so this is a
+                    # no-op for them and must not skip the mark_consolidated
+                    # step below.)
                     trajectory = self._build_trajectory_from_episodes(ready_episodes)
                     if trajectory:
                         self._apply_trajectory_to_patterns(tid, skill_name, trajectory)
@@ -363,9 +369,12 @@ class MemoryConsolidationManager:
                             f"points for {tid}/{skill_name}"
                         )
                     else:
-                        logger.warning("[CONSOLIDATION] Step 2E: SKIP — semantic store missing consolidate_episodes")
-                        continue
-                    
+                        logger.debug(
+                            f"[CONSOLIDATION] No trajectory for {tid}/{skill_name} "
+                            f"(episodes lack checkpoint_day metadata — this is "
+                            f"expected for single-shot episodes)"
+                        )
+
                     # Step 2F: Mark episodes as consolidated
                     for episode in ready_episodes:
                         logger.info(f"[CONSOLIDATION] Step 2F: marking episode {episode.episode_id} as consolidated")

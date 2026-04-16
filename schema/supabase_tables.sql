@@ -211,6 +211,47 @@ CREATE TABLE IF NOT EXISTS working_predictions (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- Pending outcomes: predictions awaiting real-world measurement.
+-- Skill executions register here with deferred 24h / 7d checkpoints.
+-- Status lifecycle: pending -> checkpoint_24h -> checkpoint_7d -> closed
+--                                                              -> expired (14d)
+CREATE TABLE IF NOT EXISTS pending_outcomes (
+  prediction_id             TEXT PRIMARY KEY,
+  tracking_id               TEXT,
+  skill_name                TEXT,
+  client_id                 TEXT NOT NULL,
+  channel_id                TEXT,
+  module_id                 TEXT,
+  run_id                    TEXT,
+  node_id                   TEXT,
+  status                    TEXT DEFAULT 'pending',
+  prediction                JSONB DEFAULT '{}',
+  generation_score          FLOAT,
+  delivery_metadata         JSONB DEFAULT '{}',
+  platform_config           JSONB DEFAULT '{}',
+  checkpoints               JSONB DEFAULT '[]',
+  checkpoint_schedule       JSONB DEFAULT '[]',
+  projection_classification TEXT,
+  composite_score           FLOAT,
+  created_at                TIMESTAMPTZ DEFAULT now(),
+  due_24h                   TIMESTAMPTZ,
+  due_7d                    TIMESTAMPTZ,
+  closed_at                 TIMESTAMPTZ,
+  updated_at                TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_outcomes_client_status
+  ON pending_outcomes(client_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_pending_outcomes_due_24h
+  ON pending_outcomes(due_24h) WHERE status = 'pending';
+
+CREATE INDEX IF NOT EXISTS idx_pending_outcomes_due_7d
+  ON pending_outcomes(due_7d) WHERE status = 'checkpoint_24h';
+
+CREATE INDEX IF NOT EXISTS idx_pending_outcomes_closed_at
+  ON pending_outcomes(closed_at DESC) WHERE status = 'closed';
+
 -- Auxiliary tables for shadow testing, accuracy, and error history.
 -- These are optional — the system degrades gracefully without them.
 CREATE TABLE IF NOT EXISTS shadow_state (

@@ -337,7 +337,15 @@ class SemanticMemoryStore:
                 existing.expected_value = 0.9 * existing.expected_value + 0.1 * expected_value
                 existing.variance = 0.9 * existing.variance + 0.1 * variance
                 existing.updated_at = datetime.now(timezone.utc).isoformat()
-                existing.source_episodes.extend([e.episode_id for e in episodes])
+
+                # Merge new source_episodes without duplicates. Re-running the
+                # consolidation cycle against the same episodes would otherwise
+                # keep appending the same IDs and inflate the list unbounded.
+                existing_ids = set(existing.source_episodes)
+                for ep in episodes:
+                    if ep.episode_id not in existing_ids:
+                        existing.source_episodes.append(ep.episode_id)
+                        existing_ids.add(ep.episode_id)
                 
                 # Store the update
                 self.store(existing)

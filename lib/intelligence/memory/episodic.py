@@ -588,7 +588,35 @@ class EpisodicMemoryStore:
             # Reconstruct Prediction
             prediction_data = doc.get("prediction", {})
             prediction = Prediction.from_dict(prediction_data) if prediction_data else Prediction()
-            
+
+            # Supabase stores skill_name / tenant_id / domain as top-level columns
+            # while the Prediction JSONB blob often omits them (e.g. episodes
+            # written by platform_ingestion). Backfill from the top-level
+            # columns so consolidate_from_episodes doesn't see empty skill_name
+            # and raise ValueError when storing a pattern.
+            if not prediction.skill_name:
+                prediction.skill_name = doc.get("skill_name", "")
+            if not prediction.tenant_id:
+                prediction.tenant_id = doc.get("tenant_id", "")
+
+            # Only override domain when the JSONB blob didn't provide one.
+            # Coerce unknown / legacy domain strings (e.g. "paid_media" from
+            # platform_ingestion) down to GENERIC rather than crashing; the
+            # write-side will be normalized separately so new episodes carry
+            # a valid Domain value.
+            jsonb_domain = prediction_data.get("domain") if isinstance(prediction_data, dict) else None
+            if jsonb_domain in (None, ""):
+                doc_domain = doc.get("domain")
+                if doc_domain:
+                    try:
+                        prediction.domain = Domain(doc_domain)
+                    except (ValueError, KeyError):
+                        logger.debug(
+                            "Unknown domain '%s' on episode %s; coercing to GENERIC",
+                            doc_domain, episode_id,
+                        )
+                        prediction.domain = Domain.GENERIC
+
             # Reconstruct Outcome
             outcome_data = doc.get("outcome", {})
             outcome = Outcome.from_dict(outcome_data) if outcome_data else Outcome()
