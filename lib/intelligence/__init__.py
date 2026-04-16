@@ -192,10 +192,14 @@ class IntelligenceEngine:
             procedural_store=self.procedural,
         )
         
-        # Initialize learning components
+        # Initialize learning components. Pass the episodic store so the
+        # predictor can supplement pattern-based reasoning with recent
+        # observed outcomes (Phase 3 hygiene fix — closes the loop
+        # between semantic predictions and episodic evidence).
         self.predictor = Predictor(
             semantic_store=self.semantic,
             procedural_store=self.procedural,
+            episodic_store=self.episodic,
         )
         # Initialize shadow testing (before Learner so it can be injected)
         self._shadow = ShadowManager(
