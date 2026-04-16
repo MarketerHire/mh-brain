@@ -65,8 +65,11 @@ _PLATFORM_LABELS: Dict[str, str] = {
     "polar_analytics": "PolarAnalytics",
 }
 
-# Domain mapping for BrightMatter episodes
-_PLATFORM_DOMAINS: Dict[str, str] = {
+# Platform-level category used for richer context inside the episode
+# metadata. We keep this for downstream analytics / dashboards — it is
+# *not* the canonical ``Domain`` enum value, which is stored separately
+# and limited to CONTENT / REVENUE / HEALTH / CAMPAIGN / GENERIC.
+_PLATFORM_CATEGORIES: Dict[str, str] = {
     "google_ads": "paid_media",
     "meta_ads": "paid_media",
     "klaviyo": "email",
@@ -79,6 +82,26 @@ _PLATFORM_DOMAINS: Dict[str, str] = {
     "amplitude": "product_analytics",
     "customerio": "lifecycle",
     "appsflyer": "mobile",
+}
+
+# Canonical BrightMatter Domain enum values for each platform. These map
+# directly onto ``lib.intelligence.types.Domain`` (enforced via the
+# ``normalize_domain`` helper on the read side). Writing the canonical
+# value at ingestion time means consolidation doesn't have to guess and
+# downstream queries grouped by ``domain`` match the enum exactly.
+_PLATFORM_DOMAINS: Dict[str, str] = {
+    "google_ads":        "campaign",
+    "meta_ads":          "campaign",
+    "klaviyo":           "content",
+    "hubspot":           "revenue",
+    "shopify":           "revenue",
+    "braze":             "content",
+    "iterable":          "content",
+    "beehiiv":           "content",
+    "triple_whale":      "revenue",
+    "amplitude":         "health",
+    "customerio":        "content",
+    "appsflyer":         "campaign",
 }
 
 
@@ -322,46 +345,76 @@ class PlatformDataOrchestrator:
     ) -> int:
         """Create episodic memories from daily metric rows."""
         domain = _PLATFORM_DOMAINS.get(platform, "generic")
+        platform_category = _PLATFORM_CATEGORIES.get(platform, "generic")
+        skill_name = f"platform-daily:{stream_id}"
         created = 0
         batch: List[Dict[str, Any]] = []
 
-        for row in rows:
-            # Generate deterministic episode ID to avoid duplicates
+        # Chronological order so we can use yesterday's signal as today's
+        # baseline for ratio-based consolidation (observed_signal /
+        # observed_baseline). Falls back to 1.0 when no prior row exists.
+        sorted_rows = sorted(rows, key=lambda r: r.metric_date)
+        prev_signal: Optional[float] = None
+
+        for row in sorted_rows:
             ep_id = hashlib.sha256(
                 f"platform-{stream_id}-{row.metric_date.isoformat()}".encode()
             ).hexdigest()[:24]
 
-            # Build prediction/outcome pair for the learning pipeline
-            primary_metric = _primary_metric(platform, row.metrics)
+            raw_primary = _primary_metric(platform, row.metrics)
+            primary_metric = float(raw_primary) if raw_primary is not None else 0.0
+
+            # Baseline = prior day's signal where possible, otherwise 1.0
+            # so ratio math never divides by zero and doesn't collapse to
+            # absurd values when a metric is missing upstream.
+            if prev_signal is not None and prev_signal > 0:
+                observed_baseline = prev_signal
+            else:
+                observed_baseline = 1.0
+
+            goal_completed = raw_primary is not None and primary_metric > 0
 
             episode = {
                 "episode_id": f"pi-{ep_id}",
                 "tenant_id": client_id,
-                "skill_name": f"platform-daily:{stream_id}",
+                "skill_name": skill_name,
                 "domain": domain,
                 "prediction": {
+                    "skill_name": skill_name,
+                    "tenant_id": client_id,
+                    "domain": domain,
                     "context": {
                         "platform": platform,
+                        "platform_category": platform_category,
                         "client_id": client_id,
                         "client_name": client_name,
                         "stream_id": stream_id,
                         "date": row.metric_date.isoformat(),
                     },
-                    "expected_signal": None,
+                    "expected_signal": 0.0,
+                    "expected_baseline": observed_baseline,
                     "patterns_used": [],
                 },
                 "outcome": {
                     "observed_signal": primary_metric,
-                    "metrics": row.metrics,
+                    "observed_baseline": observed_baseline,
+                    "goal_completed": goal_completed,
+                    "business_impact": primary_metric,
                     "metadata": {
                         "source": "platform-ingestion",
                         "record_count": row.record_count,
+                        "metrics": row.metrics,
+                        "platform": platform,
+                        "platform_category": platform_category,
+                        "has_primary_metric": raw_primary is not None,
                     },
                 },
                 "weight": 1.0,
                 "source": "platform-ingestion",
             }
             batch.append(episode)
+
+            prev_signal = primary_metric
 
             if len(batch) >= 50:
                 created += self._upsert_episodes(batch)
