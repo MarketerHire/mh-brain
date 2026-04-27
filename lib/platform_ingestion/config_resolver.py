@@ -43,6 +43,13 @@ _INTEGRATION_ALIASES: Dict[str, str] = {
     "go_high_level": "ghl",
     "h_level": "ghl",
     "highlevel": "ghl",
+    "late": "late",
+    "getlate": "late",
+    "late_dev": "late",
+    "latedev": "late",
+    "zernio": "late",
+    "snowflake": "snowflake",
+    "snowflake_warehouse": "snowflake",
 }
 
 
@@ -113,10 +120,22 @@ def detect_platforms(datasources: Dict[str, Any]) -> List[Tuple[str, Dict[str, A
                     seen.add(canon)
                     found.append((canon, item))
 
-    # 5. Check top-level named platform blocks
+    # 5. Check warehouse block (Snowflake, etc.)
+    wh = datasources.get("warehouse") or {}
+    wh_type = (wh.get("type") or "").lower()
+    if wh_type and wh_type != "not_configured":
+        canon = _INTEGRATION_ALIASES.get(wh_type, wh_type)
+        if canon not in seen:
+            wh_status = (wh.get("status") or "").lower()
+            if wh_status != "disabled":
+                seen.add(canon)
+                found.append((canon, wh))
+
+    # 6. Check top-level named platform blocks
     for key in ("klaviyo", "meta_ads", "google_ads", "shopify", "ga4",
                 "polar_analytics", "outer_signal", "power_bi", "triple_whale",
-                "ghl", "gohighlevel", "h_level"):
+                "ghl", "gohighlevel", "h_level",
+                "late", "zernio", "getlate"):
         if key in datasources and isinstance(datasources[key], dict):
             canon = _INTEGRATION_ALIASES.get(key, key)
             if canon not in seen:
@@ -293,6 +312,72 @@ def resolve_config(
         raw_config = dict(raw_config)
         raw_config.setdefault("additional_locations",
                               datasources.get("crm", {}).get("additional_locations", []))
+
+    elif platform == "late":
+        api_key = (
+            raw_config.get("api_key")
+            or os.environ.get("LATE_API_KEY", "")
+        )
+        profile_id = (
+            raw_config.get("profile_id")
+            or raw_config.get("profileId")
+            or raw_config.get("late_profile_id")
+            or raw_config.get("lateProfileId")
+            or ""
+        )
+        if not api_key:
+            logger.debug(f"late: no LATE_API_KEY for {client_name}")
+            return None
+        if not profile_id:
+            logger.debug(f"late: no profile_id for {client_name}")
+            return None
+        creds = {"api_key": api_key}
+        account_id = profile_id[:8]
+        # Pass through profile id + BQ table config via extra
+        raw_config = dict(raw_config)
+        raw_config["profile_id"] = profile_id
+
+    elif platform == "snowflake":
+        account = (
+            raw_config.get("account")
+            or os.environ.get("SWIMPLY_SNOWFLAKE_ACCOUNT", "")
+        )
+        user = (
+            raw_config.get("user")
+            or os.environ.get("SWIMPLY_SNOWFLAKE_USER", "")
+        )
+        token = (
+            raw_config.get("fallback_auth", {}).get("token")
+            or raw_config.get("token")
+            or os.environ.get("SWIMPLY_SNOWFLAKE_TOKEN", "")
+        )
+        private_key_pem = os.environ.get("SWIMPLY_SNOWFLAKE_PRIVATE_KEY", "")
+        database = raw_config.get("database") or "FIVETRAN_DATABASE"
+        warehouse_name = raw_config.get("warehouse_name") or raw_config.get("warehouse") or ""
+        role = raw_config.get("role") or ""
+
+        if not account:
+            logger.debug(f"snowflake: no account for {client_name}")
+            return None
+        if not user:
+            logger.debug(f"snowflake: no user for {client_name}")
+            return None
+        if not token and not private_key_pem:
+            logger.debug(f"snowflake: no token or private key for {client_name}")
+            return None
+
+        creds = {
+            "account": account,
+            "user": user,
+            "token": token,
+            "private_key_pem": private_key_pem,
+            "database": database,
+            "warehouse_name": warehouse_name,
+            "role": role,
+        }
+        account_id = account[:12]
+        raw_config = dict(raw_config)
+        raw_config.setdefault("database", database)
 
     else:
         logger.debug(f"No resolver for platform: {platform}")

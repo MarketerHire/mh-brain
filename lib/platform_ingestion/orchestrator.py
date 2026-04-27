@@ -17,6 +17,8 @@ from .adapters.klaviyo import KlaviyoAdapter
 from .adapters.hubspot import HubSpotAdapter
 from .adapters.shopify import ShopifyAdapter
 from .adapters.ghl import GoHighLevelAdapter
+from .adapters.late import LateAdapter
+from .adapters.snowflake import SnowflakeAdapter
 from .adapters.generic import (
     BrazeAdapter, IterableAdapter, BeehiivAdapter,
     TripleWhaleAdapter, AmplitudeAdapter, CustomerIOAdapter, AppsFlyerAdapter,
@@ -40,6 +42,8 @@ _ADAPTERS: Dict[str, BasePlatformAdapter] = {
     "customerio": CustomerIOAdapter(),
     "appsflyer": AppsFlyerAdapter(),
     "ghl": GoHighLevelAdapter(),
+    "late": LateAdapter(),
+    "snowflake": SnowflakeAdapter(),
 }
 
 # Platforms that need rate-limit staggering
@@ -66,6 +70,8 @@ _PLATFORM_LABELS: Dict[str, str] = {
     "ga4": "GA4",
     "polar_analytics": "PolarAnalytics",
     "ghl": "GoHighLevel",
+    "late": "Late",
+    "snowflake": "Snowflake",
 }
 
 # Platform-level category used for richer context inside the episode
@@ -86,6 +92,8 @@ _PLATFORM_CATEGORIES: Dict[str, str] = {
     "customerio": "lifecycle",
     "appsflyer": "mobile",
     "ghl": "crm",
+    "late": "organic_social",
+    "snowflake": "marketplace",
 }
 
 # Canonical BrightMatter Domain enum values for each platform. These map
@@ -565,4 +573,6 @@ def _primary_metric(platform: str, metrics: Dict[str, Any]) -> Optional[float]:
         return metrics.get("active_users")
     elif platform == "appsflyer":
         return metrics.get("installs")
+    elif platform == "snowflake":
+        return metrics.get("gmv", metrics.get("total_bookings"))
     return None

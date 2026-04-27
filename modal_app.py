@@ -37,6 +37,7 @@ bm_image = (
         "requests>=2.31.0",
         "firebase-admin>=6.0.0",
         "google-ads>=24.0.0",
+        "snowflake-connector-python>=3.6.0",
     )
     .add_local_dir(".", remote_path=WORKSPACE_PATH, copy=True)
 )
@@ -47,7 +48,17 @@ _required_secrets = [
 ]
 
 _optional_secrets = []
-for _name in ("bm-mhos-supabase", "bm-bigquery", "bm-airtable", "mh1-firebase", "mh1-all", "bm-mcp-fmt", "bm-powerbi-mrchristmas"):
+for _name in (
+    "bm-mhos-supabase",
+    "bm-bigquery",
+    "bm-airtable",
+    "mh1-firebase",
+    "mh1-all",
+    "mh1-shared-tools",  # LATE_API_KEY, RESEND_API_KEY, N8N_API_KEY, etc.
+    "bm-mcp-fmt",
+    "bm-powerbi-mrchristmas",
+    "bm-snowflake-swimply",
+):
     try:
         _optional_secrets.append(modal.Secret.from_name(_name, required_keys=[]))
     except Exception:
