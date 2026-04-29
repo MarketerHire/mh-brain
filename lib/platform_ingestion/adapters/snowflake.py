@@ -62,8 +62,8 @@ ORDER BY metric_date
 _SEARCH_SQL = """
 SELECT TIMESTAMP::DATE AS metric_date,
        COUNT(*) AS searches,
-       COUNT(DISTINCT USER_ID) AS unique_searchers
-FROM {database}.SEGMENT_EVENT_UNIONS.USER_SUBMITTED_SEARCH_UNION
+       COUNT(DISTINCT ANONYMOUS_ID) AS unique_searchers
+FROM {database}.FACTS.STG_SEARCH_EVENTS_FORMATTED
 WHERE TIMESTAMP::DATE BETWEEN %(start)s AND %(end)s
 GROUP BY metric_date
 ORDER BY metric_date
