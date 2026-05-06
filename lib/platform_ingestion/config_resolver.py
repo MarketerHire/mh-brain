@@ -50,6 +50,10 @@ _INTEGRATION_ALIASES: Dict[str, str] = {
     "zernio": "late",
     "snowflake": "snowflake",
     "snowflake_warehouse": "snowflake",
+    # Aliases for Google sources delivered via mh-brain's non-Fivetran path.
+    # Adapter wiring (entries in `_ADAPTERS`) landed in PR #11 (gsc.py +
+    # youtube_analytics.py). These aliases let the middleware → datasources
+    # converter produce a stable canonical key regardless of input order.
     "gsc": "gsc",
     "google_search_console": "gsc",
     "search_console": "gsc",
