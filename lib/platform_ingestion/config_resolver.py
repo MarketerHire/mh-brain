@@ -50,6 +50,14 @@ _INTEGRATION_ALIASES: Dict[str, str] = {
     "zernio": "late",
     "snowflake": "snowflake",
     "snowflake_warehouse": "snowflake",
+    "gsc": "gsc",
+    "google_search_console": "gsc",
+    "search_console": "gsc",
+    "searchconsole": "gsc",
+    "youtube": "youtube_analytics",
+    "youtube_analytics": "youtube_analytics",
+    "youtubeanalytics": "youtube_analytics",
+    "yt_analytics": "youtube_analytics",
 }
 
 
@@ -135,7 +143,9 @@ def detect_platforms(datasources: Dict[str, Any]) -> List[Tuple[str, Dict[str, A
     for key in ("klaviyo", "meta_ads", "google_ads", "shopify", "ga4",
                 "polar_analytics", "outer_signal", "power_bi", "triple_whale",
                 "ghl", "gohighlevel", "h_level",
-                "late", "zernio", "getlate"):
+                "late", "zernio", "getlate",
+                "gsc", "google_search_console", "search_console",
+                "youtube", "youtube_analytics"):
         if key in datasources and isinstance(datasources[key], dict):
             canon = _INTEGRATION_ALIASES.get(key, key)
             if canon not in seen:
@@ -336,6 +346,87 @@ def resolve_config(
         # Pass through profile id + BQ table config via extra
         raw_config = dict(raw_config)
         raw_config["profile_id"] = profile_id
+
+    elif platform == "gsc":
+        # OAuth credentials live in env (shared across clients), site_url
+        # comes from datasources.json per client.
+        client_oauth_id = (
+            raw_config.get("client_id")
+            or os.environ.get("GSC_CLIENT_ID", "")
+            or os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
+            or os.environ.get("GOOGLE_ADS_CLIENT_ID", "")
+        )
+        client_oauth_secret = (
+            raw_config.get("client_secret")
+            or os.environ.get("GSC_CLIENT_SECRET", "")
+            or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
+            or os.environ.get("GOOGLE_ADS_CLIENT_SECRET", "")
+        )
+        refresh_token = (
+            raw_config.get("refresh_token")
+            or os.environ.get("GSC_REFRESH_TOKEN", "")
+            or os.environ.get("GA4_REFRESH_TOKEN", "")
+        )
+        site_url = (
+            raw_config.get("site_url")
+            or raw_config.get("siteUrl")
+            or raw_config.get("property")
+            or ""
+        )
+        if not (client_oauth_id and client_oauth_secret and refresh_token):
+            logger.debug(f"gsc: missing OAuth credentials for {client_name}")
+            return None
+        if not site_url:
+            logger.debug(f"gsc: no site_url for {client_name}")
+            return None
+        creds = {
+            "client_id": client_oauth_id,
+            "client_secret": client_oauth_secret,
+            "refresh_token": refresh_token,
+            "site_url": site_url,
+        }
+        account_id = site_url[:32]
+
+    elif platform == "youtube_analytics":
+        client_oauth_id = (
+            raw_config.get("client_id")
+            or os.environ.get("YT_CLIENT_ID", "")
+            or os.environ.get("YOUTUBE_CLIENT_ID", "")
+            or os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
+            or os.environ.get("GOOGLE_ADS_CLIENT_ID", "")
+        )
+        client_oauth_secret = (
+            raw_config.get("client_secret")
+            or os.environ.get("YT_CLIENT_SECRET", "")
+            or os.environ.get("YOUTUBE_CLIENT_SECRET", "")
+            or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
+            or os.environ.get("GOOGLE_ADS_CLIENT_SECRET", "")
+        )
+        refresh_token = (
+            raw_config.get("refresh_token")
+            or os.environ.get("YT_REFRESH_TOKEN", "")
+            or os.environ.get("GA4_REFRESH_TOKEN", "")
+        )
+        channel_id = (
+            raw_config.get("channel_id")
+            or raw_config.get("channelId")
+            or ""
+        )
+        if not (client_oauth_id and client_oauth_secret and refresh_token):
+            logger.debug(
+                f"youtube_analytics: missing OAuth credentials for {client_name}"
+            )
+            return None
+        if not channel_id:
+            logger.debug(f"youtube_analytics: no channel_id for {client_name}")
+            return None
+        creds = {
+            "client_id": client_oauth_id,
+            "client_secret": client_oauth_secret,
+            "refresh_token": refresh_token,
+            "channel_id": channel_id,
+        }
+        account_id = channel_id
 
     elif platform == "snowflake":
         account = (
