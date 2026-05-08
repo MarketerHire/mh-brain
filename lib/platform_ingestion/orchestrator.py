@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
+import urllib.error
+import urllib.request
 import uuid
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -507,7 +510,32 @@ class PlatformDataOrchestrator:
         return result
 
     def _load_datasources(self, client_id: str) -> Optional[Dict[str, Any]]:
-        """Load datasources.json for a client from Firebase, with FS fallback."""
+        """Load datasources for a client.
+
+        Resolution order (first non-empty wins):
+
+        1. **Middleware** (``MH1_API_URL/api/clients/{id}/data/datasets``).
+           This is the canonical source — per-client dataset registry plus
+           inline ``config`` blocks now live in
+           ``mh1-middleware-sdk/app/data_middleware.py::_CUSTOM_SYNC_DATASETS``.
+           The response is mapped back to the legacy ``datasources.json``
+           shape so the rest of the pipeline (``detect_platforms``,
+           ``resolve_config``) can stay unchanged.
+        2. **Firebase** (``clients/{id}/config/datasources``) — legacy doc,
+           kept for the migration window while not every client has been
+           registered in the middleware.
+        3. **Filesystem** (``mh1-hq/clients/{id}/config/datasources.json``)
+           — local-dev fallback. ``mh1-hq`` is being deprecated and Modal
+           workers can't read this path, so it's strictly a developer
+           convenience.
+
+        If ``MH1_API_URL`` is unset, step 1 is skipped silently — module
+        import must not depend on the middleware being reachable.
+        """
+        ds = self._load_datasources_from_middleware(client_id)
+        if ds:
+            return ds
+
         try:
             from lib.firebase_client import get_firebase_client
             fb = get_firebase_client()
@@ -520,9 +548,59 @@ class PlatformDataOrchestrator:
 
         return self._load_datasources_from_filesystem(client_id)
 
+    def _load_datasources_from_middleware(
+        self, client_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch the per-client dataset registry from the middleware and
+        rewrite it into the legacy datasources.json shape.
+
+        Returns ``None`` on any failure (unset env, network error, non-200,
+        empty datasets list) so the caller can fall through to Firebase /
+        FS without raising. ``MH1_API_URL`` and ``MH1_API_KEY`` are read
+        lazily so module import stays cheap and testable in isolation.
+        """
+        api_url = os.environ.get("MH1_API_URL", "").strip()
+        api_key = os.environ.get("MH1_API_KEY", "").strip()
+        if not api_url or not api_key:
+            logger.debug(
+                "Middleware datasources skipped (MH1_API_URL/MH1_API_KEY unset)"
+            )
+            return None
+
+        url = f"{api_url.rstrip('/')}/api/clients/{client_id}/data/datasets"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "x-api-key": api_key,
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                body = resp.read()
+        except urllib.error.HTTPError as e:
+            # 404 = client not registered in middleware yet — fall through.
+            # Everything else still falls through but logs at warning.
+            level = logger.debug if e.code == 404 else logger.warning
+            level(f"Middleware datasources for {client_id}: HTTP {e.code}")
+            return None
+        except Exception as e:
+            logger.warning(f"Middleware datasources for {client_id}: {e}")
+            return None
+
+        try:
+            payload = json.loads(body.decode())
+        except Exception as e:
+            logger.warning(f"Middleware datasources for {client_id}: bad JSON ({e})")
+            return None
+
+        ds = _middleware_response_to_datasources(payload)
+        if not ds.get("integrations"):
+            return None
+        return ds
+
     def _load_datasources_from_filesystem(self, client_id: str) -> Optional[Dict[str, Any]]:
         """Fallback: read datasources.json from local filesystem."""
-        import json
         clients_dir = os.environ.get("MH1_CLIENTS_DIR", "/Applications/MH1/mh1-hq/clients")
         path = os.path.join(clients_dir, client_id, "config", "datasources.json")
         if not os.path.isfile(path):
@@ -565,6 +643,84 @@ class PlatformDataOrchestrator:
             }, on_conflict="source").execute()
         except Exception as e:
             logger.warning(f"Watermark update failed for {stream_id}: {e}")
+
+
+def _middleware_response_to_datasources(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert ``GET /api/clients/{id}/data/datasets`` into the legacy
+    ``datasources.json`` shape consumed by ``detect_platforms`` and
+    ``resolve_config``.
+
+    Middleware shape (one entry per registered dataset)::
+
+        {
+          "datasets": [
+            {"datasetId": "mindrx_google_search_console",
+             "service": "Google Search Console",
+             "config": {"site_url": "sc-domain:mindrxgroup.com"}},
+            {"datasetId": "marts_mindrx", "service": "dbt_marts"}
+          ]
+        }
+
+    Legacy shape::
+
+        {
+          "integrations": {
+            "gsc": {"site_url": "sc-domain:mindrxgroup.com",
+                     "status": "connected",
+                     "dataset_id": "mindrx_google_search_console"},
+            ...
+          }
+        }
+
+    Mapping rules:
+
+    - The ``service`` string is normalised (lowercased, spaces → underscores)
+      and run through ``_INTEGRATION_ALIASES``. So ``"Google Search Console"``
+      → ``"google_search_console"`` → (alias lookup) → ``"gsc"``. If the
+      alias table has no entry, the normalised key is used verbatim — that
+      lets clients carrying datasets with no adapter (``dbt_marts``,
+      future platforms) flow through without the orchestrator crashing;
+      they're simply skipped at adapter dispatch.
+    - ``config`` fields are spread under ``integrations.{platform}``.
+    - ``status: "connected"`` is set so ``detect_platforms`` doesn't treat
+      the entry as ``not_configured`` / ``pending`` and drop it.
+    - ``dataset_id`` is preserved on the integration so adapters that
+      need to address a specific BQ dataset can read it via ``raw_config``.
+    - First-write wins per platform: if the same client has two datasets
+      mapping to the same canonical platform, the first one's ``config``
+      is kept (this matches the earlier ``seen`` dedup in
+      ``detect_platforms``).
+    """
+    # Local import to avoid a circular import (config_resolver imports
+    # adapters.base, which has no orchestrator dependency, but we still
+    # want orchestrator → config_resolver to be the only direction).
+    from .config_resolver import _INTEGRATION_ALIASES
+
+    datasets = (payload or {}).get("datasets") or []
+    integrations: Dict[str, Dict[str, Any]] = {}
+
+    for entry in datasets:
+        if not isinstance(entry, dict):
+            continue
+        service = (entry.get("service") or entry.get("platform") or "").strip()
+        if not service:
+            continue
+
+        # Normalise: "Google Search Console" → "google_search_console"
+        normalised = service.lower().replace(" ", "_").replace("-", "_")
+        canon = _INTEGRATION_ALIASES.get(normalised, normalised)
+
+        # First-write wins so we don't clobber a richer config block with
+        # a barer one when the same platform appears twice.
+        if canon in integrations:
+            continue
+
+        cfg = dict(entry.get("config") or {})
+        cfg.setdefault("status", "connected")
+        cfg["dataset_id"] = entry.get("datasetId") or entry.get("id") or ""
+        integrations[canon] = cfg
+
+    return {"integrations": integrations}
 
 
 def _primary_metric(platform: str, metrics: Dict[str, Any]) -> Optional[float]:
