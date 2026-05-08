@@ -617,7 +617,7 @@ class GoHighLevelAdapter(BasePlatformAdapter):
           - pipeline_stages
           - tags
         """
-        bq_dataset = config.extra.get("bq_dataset", "")
+        bq_dataset = config.extra.get("bq_dataset", "") or config.extra.get("dataset_id", "")
         if not bq_dataset:
             logger.info("GHL BQ raw: no bq_dataset in config, skipping")
             return
@@ -670,7 +670,7 @@ class GoHighLevelAdapter(BasePlatformAdapter):
     # ── BigQuery sink (aggregated counts only) ────────────────────
 
     def _write_to_bq(self, config: PlatformConfig, rows: List[Dict[str, Any]]) -> None:
-        bq_dataset = config.extra.get("bq_dataset", "")
+        bq_dataset = config.extra.get("bq_dataset", "") or config.extra.get("dataset_id", "")
         if not bq_dataset:
             logger.info("GHL BQ: no bq_dataset in config, skipping BQ write")
             return
