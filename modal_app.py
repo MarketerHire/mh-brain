@@ -55,6 +55,7 @@ for _name in (
     "mh1-firebase",
     "mh1-all",
     "mh1-shared-tools",  # LATE_API_KEY, RESEND_API_KEY, N8N_API_KEY, etc.
+    "mh-brain-google-oauth",  # GSC_REFRESH_TOKEN, YT_REFRESH_TOKEN, GOOGLE_OAUTH_*
     "bm-mcp-fmt",
     "bm-powerbi-mrchristmas",
     "bm-snowflake-swimply",

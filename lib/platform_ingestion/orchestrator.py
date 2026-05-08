@@ -19,6 +19,8 @@ from .adapters.shopify import ShopifyAdapter
 from .adapters.ghl import GoHighLevelAdapter
 from .adapters.late import LateAdapter
 from .adapters.snowflake import SnowflakeAdapter
+from .adapters.gsc import GoogleSearchConsoleAdapter
+from .adapters.youtube_analytics import YouTubeAnalyticsAdapter
 from .adapters.generic import (
     BrazeAdapter, IterableAdapter, BeehiivAdapter,
     TripleWhaleAdapter, AmplitudeAdapter, CustomerIOAdapter, AppsFlyerAdapter,
@@ -44,6 +46,8 @@ _ADAPTERS: Dict[str, BasePlatformAdapter] = {
     "ghl": GoHighLevelAdapter(),
     "late": LateAdapter(),
     "snowflake": SnowflakeAdapter(),
+    "gsc": GoogleSearchConsoleAdapter(),
+    "youtube_analytics": YouTubeAnalyticsAdapter(),
 }
 
 # Platforms that need rate-limit staggering
@@ -72,6 +76,8 @@ _PLATFORM_LABELS: Dict[str, str] = {
     "ghl": "GoHighLevel",
     "late": "Late",
     "snowflake": "Snowflake",
+    "gsc": "GoogleSearchConsole",
+    "youtube_analytics": "YouTubeAnalytics",
 }
 
 # Platform-level category used for richer context inside the episode
@@ -94,6 +100,8 @@ _PLATFORM_CATEGORIES: Dict[str, str] = {
     "ghl": "crm",
     "late": "organic_social",
     "snowflake": "marketplace",
+    "gsc": "organic_search",
+    "youtube_analytics": "organic_video",
 }
 
 # Canonical BrightMatter Domain enum values for each platform. These map
@@ -114,6 +122,8 @@ _PLATFORM_DOMAINS: Dict[str, str] = {
     "amplitude":         "health",
     "customerio":        "content",
     "appsflyer":         "campaign",
+    "gsc":               "content",
+    "youtube_analytics": "content",
 }
 
 
@@ -575,4 +585,8 @@ def _primary_metric(platform: str, metrics: Dict[str, Any]) -> Optional[float]:
         return metrics.get("installs")
     elif platform == "snowflake":
         return metrics.get("gmv", metrics.get("total_bookings"))
+    elif platform == "gsc":
+        return metrics.get("clicks")
+    elif platform == "youtube_analytics":
+        return metrics.get("views")
     return None
