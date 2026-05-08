@@ -1,4 +1,4 @@
-"""GoHighLevel adapter — aggregated daily metrics only, zero PII.
+"""GoHighLevel adapter — daily metrics + raw entity tables, zero PII.
 
 PII Protection:
     GHL API returns full records (names, emails, phones, addresses).
@@ -7,8 +7,13 @@ PII Protection:
     No PII is ever held in memory beyond the initial strip, and no PII
     is ever written to Supabase or BigQuery.
 
-    BQ output schema: daily_metrics (counts + revenue per day per location).
-    No record-level data. No identifiers. No contact details.
+    BQ output:
+      - daily_metrics  — aggregated counts + revenue per day per location
+      - contacts       — PII-stripped contact records (full replace each sync)
+      - opportunities  — PII-stripped opportunity records
+      - events         — PII-stripped calendar event records
+      - pipeline_stages — reference table (pipeline/stage names + positions)
+      - tags           — reference table (tag names)
 
 Supports multi-location pulls via `additional_locations` in config.
 """
@@ -34,13 +39,24 @@ _GHL_UA = "MH1-DataBridge/1.0"
 
 # ── PII allowlists — only these fields survive _strip_to_safe ─────
 _SAFE_FIELDS: Dict[str, set] = {
-    "contact":      {"id", "dateAdded", "tags", "source", "country"},
-    "opportunity":  {"id", "dateAdded", "createdAt", "status", "monetaryValue",
-                     "pipelineId", "pipelineStageId", "source"},
-    "event":        {"id", "startTime", "start", "endTime", "end",
-                     "calendarId", "status", "appointmentStatus"},
-    "conversation": {"id", "dateAdded", "createdAt", "type", "status",
-                     "lastMessageType", "lastMessageDirection"},
+    "contact": {
+        "id", "dateAdded", "dateUpdated", "type", "tags", "source",
+        "attributions", "assignedTo", "country", "state", "city",
+        "customFields", "dnd", "locationId",
+    },
+    "opportunity": {
+        "id", "dateAdded", "createdAt", "dateUpdated", "status",
+        "monetaryValue", "pipelineId", "pipelineStageId", "source",
+        "assignedTo", "name", "contactId", "locationId",
+    },
+    "event": {
+        "id", "startTime", "start", "endTime", "end", "calendarId",
+        "status", "appointmentStatus", "title", "contactId", "locationId",
+    },
+    "conversation": {
+        "id", "dateAdded", "createdAt", "type", "status",
+        "lastMessageType", "lastMessageDirection", "contactId", "locationId",
+    },
 }
 
 
@@ -96,10 +112,21 @@ class GoHighLevelAdapter(BasePlatformAdapter):
         all_rows: List[DailyMetricRow] = []
         bq_rows: List[Dict[str, Any]] = []
 
+        # Accumulate raw entity records across all locations
+        all_contacts: List[Dict] = []
+        all_opportunities: List[Dict] = []
+        all_events: List[Dict] = []
+        all_conversations: List[Dict] = []
+
         for token, loc_id, label in locations:
-            day_metrics = self._pull_location(
+            day_metrics, raw_entities = self._pull_location(
                 token, loc_id, start_date, end_date, config.client_name,
             )
+
+            all_contacts.extend(raw_entities.get("contacts", []))
+            all_opportunities.extend(raw_entities.get("opportunities", []))
+            all_events.extend(raw_entities.get("events", []))
+            all_conversations.extend(raw_entities.get("conversations", []))
 
             for d, m in sorted(day_metrics.items()):
                 if not any(v for v in m.values()):
@@ -122,11 +149,28 @@ class GoHighLevelAdapter(BasePlatformAdapter):
                     "ingested_at": datetime.now(timezone.utc).isoformat(),
                 })
 
+        # Write aggregated daily_metrics to BQ (existing flow, unchanged)
         if bq_rows:
             self._write_to_bq(config, bq_rows)
 
+        # Pull reference tables and write raw entities to BQ
+        if locations:
+            token_0, loc_id_0, _ = locations[0]
+            pipelines = self._pull_pipeline_stages(token_0, loc_id_0)
+            tags = self._pull_tags(token_0, loc_id_0)
+
+            self._write_raw_entities_to_bq(
+                config,
+                contacts=all_contacts,
+                opportunities=all_opportunities,
+                events=all_events,
+                conversations=all_conversations,
+                pipelines=pipelines,
+                tags=tags,
+            )
+
         logger.info(
-            f"GHL: {len(all_rows)} rows across {len(locations)} locations "
+            f"GHL: {len(all_rows)} metric rows across {len(locations)} locations "
             f"for {config.client_name}"
         )
         return all_rows
@@ -160,7 +204,12 @@ class GoHighLevelAdapter(BasePlatformAdapter):
         start_date: date,
         end_date: date,
         client_name: str,
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, List[Dict]]]:
+        """Pull all entities for one location.
+
+        Returns (day_metrics, raw_entities) where raw_entities maps
+        entity type to the list of PII-stripped records.
+        """
         day_metrics: Dict[str, Dict[str, Any]] = defaultdict(
             lambda: {
                 "contacts_created": 0,
@@ -174,15 +223,25 @@ class GoHighLevelAdapter(BasePlatformAdapter):
             }
         )
 
-        self._pull_contacts(token, location_id, start_date, end_date, day_metrics)
-        self._pull_opportunities(token, location_id, start_date, end_date, day_metrics)
-        self._pull_calendar_events(token, location_id, start_date, end_date, day_metrics)
-        self._pull_conversations(token, location_id, start_date, end_date, day_metrics)
+        contacts = self._pull_contacts(token, location_id, start_date, end_date, day_metrics)
+        opportunities = self._pull_opportunities(token, location_id, start_date, end_date, day_metrics)
+        events = self._pull_calendar_events(token, location_id, start_date, end_date, day_metrics)
+        conversations = self._pull_conversations(token, location_id, start_date, end_date, day_metrics)
+
+        raw_entities: Dict[str, List[Dict]] = {
+            "contacts": contacts,
+            "opportunities": opportunities,
+            "events": events,
+            "conversations": conversations,
+        }
 
         logger.info(
-            f"GHL location {location_id[:8]}: {len(day_metrics)} days for {client_name}"
+            f"GHL location {location_id[:8]}: {len(day_metrics)} days, "
+            f"{len(contacts)} contacts, {len(opportunities)} opps, "
+            f"{len(events)} events, {len(conversations)} convos "
+            f"for {client_name}"
         )
-        return day_metrics
+        return day_metrics, raw_entities
 
     # ── Contacts (PII stripped immediately) ────────────────────────
 
@@ -193,9 +252,12 @@ class GoHighLevelAdapter(BasePlatformAdapter):
         start_date: date,
         end_date: date,
         day_metrics: Dict[str, Dict[str, Any]],
-    ) -> None:
+    ) -> List[Dict]:
         """Pull contact counts by date. Results arrive newest-first, so we
-        skip contacts newer than end_date and stop once we pass start_date."""
+        skip contacts newer than end_date and stop once we pass start_date.
+
+        Returns all PII-stripped contact records within the date range.
+        """
         start_epoch = int(
             datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
             .timestamp() * 1000
@@ -204,6 +266,7 @@ class GoHighLevelAdapter(BasePlatformAdapter):
         end_iso = end_date.isoformat()
         fetched = 0
         next_page = None
+        all_records: List[Dict] = []
         try:
             while True:
                 url = (
@@ -236,6 +299,7 @@ class GoHighLevelAdapter(BasePlatformAdapter):
                         past_range = True
                         break
                     day_metrics[cd]["contacts_created"] += 1
+                    all_records.append(c)
                     fetched += 1
 
                 if past_range:
@@ -252,6 +316,8 @@ class GoHighLevelAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning(f"GHL contacts fetch: {e}")
 
+        return all_records
+
     # ── Opportunities (PII stripped immediately) ──────────────────
 
     def _pull_opportunities(
@@ -261,7 +327,9 @@ class GoHighLevelAdapter(BasePlatformAdapter):
         start_date: date,
         end_date: date,
         day_metrics: Dict[str, Dict[str, Any]],
-    ) -> None:
+    ) -> List[Dict]:
+        """Pull opportunities, update day_metrics, and return PII-stripped records."""
+        all_records: List[Dict] = []
         try:
             data = _ghl_post(f"{GHL_BASE}/opportunities/search", token, {
                 "location_id": location_id,
@@ -283,6 +351,7 @@ class GoHighLevelAdapter(BasePlatformAdapter):
                     continue
 
                 day_metrics[created]["opportunities_created"] += 1
+                all_records.append(opp)
                 status = (opp.get("status") or "").lower()
                 monetary = self._safe_float(opp.get("monetaryValue"))
 
@@ -294,13 +363,15 @@ class GoHighLevelAdapter(BasePlatformAdapter):
 
         except urllib.error.HTTPError as e:
             if e.code in (400, 422):
-                self._pull_opportunities_fallback(
+                all_records = self._pull_opportunities_fallback(
                     token, location_id, start_date, end_date, day_metrics,
                 )
             else:
                 logger.warning(f"GHL opportunities fetch: {e}")
         except Exception as e:
             logger.warning(f"GHL opportunities fetch: {e}")
+
+        return all_records
 
     def _pull_opportunities_fallback(
         self,
@@ -309,7 +380,9 @@ class GoHighLevelAdapter(BasePlatformAdapter):
         start_date: date,
         end_date: date,
         day_metrics: Dict[str, Dict[str, Any]],
-    ) -> None:
+    ) -> List[Dict]:
+        """Fallback: iterate pipelines individually. Returns PII-stripped records."""
+        all_records: List[Dict] = []
         try:
             pipelines_data = _ghl_get(
                 f"{GHL_BASE}/opportunities/pipelines?locationId={location_id}",
@@ -333,6 +406,7 @@ class GoHighLevelAdapter(BasePlatformAdapter):
                     if not created or not (start_date.isoformat() <= created <= end_date.isoformat()):
                         continue
                     day_metrics[created]["opportunities_created"] += 1
+                    all_records.append(opp)
                     status = (opp.get("status") or "").lower()
                     monetary = self._safe_float(opp.get("monetaryValue"))
                     if status == "won":
@@ -343,6 +417,7 @@ class GoHighLevelAdapter(BasePlatformAdapter):
                 time.sleep(self.RATE_LIMIT_DELAY)
         except Exception as e:
             logger.warning(f"GHL opportunities fallback: {e}")
+        return all_records
 
     # ── Calendar Events (PII stripped immediately) ────────────────
 
@@ -353,7 +428,9 @@ class GoHighLevelAdapter(BasePlatformAdapter):
         start_date: date,
         end_date: date,
         day_metrics: Dict[str, Dict[str, Any]],
-    ) -> None:
+    ) -> List[Dict]:
+        """Pull calendar events, update day_metrics, and return PII-stripped records."""
+        all_records: List[Dict] = []
         try:
             cals_data = _ghl_get(
                 f"{GHL_BASE}/calendars/?locationId={location_id}", token,
@@ -389,10 +466,13 @@ class GoHighLevelAdapter(BasePlatformAdapter):
                     event_start = (event.get("startTime") or event.get("start") or "")[:10]
                     if event_start and start_date.isoformat() <= event_start <= end_date.isoformat():
                         day_metrics[event_start]["bookings"] += 1
+                        all_records.append(event)
 
                 time.sleep(self.RATE_LIMIT_DELAY)
         except Exception as e:
             logger.warning(f"GHL calendar events fetch: {e}")
+
+        return all_records
 
     # ── Conversations (PII stripped immediately) ──────────────────
 
@@ -403,9 +483,11 @@ class GoHighLevelAdapter(BasePlatformAdapter):
         start_date: date,
         end_date: date,
         day_metrics: Dict[str, Dict[str, Any]],
-    ) -> None:
+    ) -> List[Dict]:
+        """Pull conversations, update day_metrics, and return PII-stripped records."""
         start_iso = start_date.isoformat()
         end_iso = end_date.isoformat()
+        all_records: List[Dict] = []
 
         for endpoint in (
             f"{GHL_BASE}/conversations/search",
@@ -427,17 +509,163 @@ class GoHighLevelAdapter(BasePlatformAdapter):
                     created = (conv.get("dateAdded") or conv.get("createdAt") or "")[:10]
                     if created and start_iso <= created <= end_iso:
                         day_metrics[created]["conversations"] += 1
-                return
+                        all_records.append(conv)
+                return all_records
             except urllib.error.HTTPError as e:
                 if e.code in (404, 400):
                     continue
                 logger.warning(f"GHL conversations fetch: {e}")
-                return
+                return all_records
             except Exception as e:
                 logger.warning(f"GHL conversations fetch: {e}")
-                return
+                return all_records
 
         logger.debug(f"GHL conversations: no working endpoint for {location_id[:8]}")
+        return all_records
+
+    # ── Pipeline stages + tags (reference tables) ──────────────────
+
+    def _pull_pipeline_stages(self, token: str, location_id: str) -> List[Dict]:
+        """Pull pipeline definitions with stage names. Returns flattened rows."""
+        rows: List[Dict] = []
+        try:
+            data = _ghl_get(
+                f"{GHL_BASE}/opportunities/pipelines?locationId={location_id}",
+                token,
+            )
+            for pipeline in data.get("pipelines", []):
+                pid = pipeline.get("id", "")
+                pname = pipeline.get("name", "")
+                for stage in pipeline.get("stages", []):
+                    rows.append({
+                        "pipeline_id": pid,
+                        "pipeline_name": pname,
+                        "stage_id": stage.get("id", ""),
+                        "stage_name": stage.get("name", ""),
+                        "position": stage.get("position", 0),
+                    })
+            logger.info(f"GHL: pulled {len(rows)} pipeline stages")
+        except Exception as e:
+            logger.warning(f"GHL pipeline stages fetch: {e}")
+        return rows
+
+    def _pull_tags(self, token: str, location_id: str) -> List[Dict]:
+        """Pull all tags for the location."""
+        rows: List[Dict] = []
+        try:
+            data = _ghl_get(
+                f"{GHL_BASE}/locations/{location_id}/tags",
+                token,
+            )
+            for tag in data.get("tags", []):
+                rows.append({
+                    "tag_id": tag.get("id", ""),
+                    "tag_name": tag.get("name", ""),
+                    "location_id": location_id,
+                })
+            logger.info(f"GHL: pulled {len(rows)} tags")
+        except Exception as e:
+            logger.warning(f"GHL tags fetch: {e}")
+        return rows
+
+    # ── Flatten nested fields for BQ ─────────────────────────────
+
+    @staticmethod
+    def _flatten_for_bq(records: List[Dict]) -> List[Dict]:
+        """Serialize nested/complex fields to JSON strings for BQ auto-detect.
+
+        - tags (list of strings) → comma-separated string
+        - attributions (list of dicts) → JSON string
+        - customFields (list of dicts) → JSON string
+        - any remaining dict/list values → JSON string
+        """
+        flattened: List[Dict] = []
+        for rec in records:
+            row: Dict[str, Any] = {}
+            for k, v in rec.items():
+                if k == "tags" and isinstance(v, list):
+                    row["tags"] = ",".join(str(t) for t in v)
+                elif k == "attributions" and isinstance(v, (list, dict)):
+                    row["attributions_json"] = json.dumps(v)
+                elif k == "customFields" and isinstance(v, (list, dict)):
+                    row["custom_fields_json"] = json.dumps(v)
+                elif isinstance(v, (dict, list)):
+                    row[k + "_json"] = json.dumps(v)
+                else:
+                    row[k] = v
+            flattened.append(row)
+        return flattened
+
+    # ── Raw entity BQ writes ─────────────────────────────────────
+
+    def _write_raw_entities_to_bq(
+        self,
+        config: PlatformConfig,
+        contacts: List[Dict],
+        opportunities: List[Dict],
+        events: List[Dict],
+        conversations: List[Dict],
+        pipelines: List[Dict],
+        tags: List[Dict],
+    ) -> None:
+        """Write PII-stripped raw entity records to per-type BQ tables.
+
+        Tables written (all WRITE_TRUNCATE — full replace each sync):
+          - contacts
+          - opportunities
+          - events
+          - pipeline_stages
+          - tags
+        """
+        bq_dataset = config.extra.get("bq_dataset", "")
+        if not bq_dataset:
+            logger.info("GHL BQ raw: no bq_dataset in config, skipping")
+            return
+
+        target_project = "moe-platform-479917"
+        try:
+            client = self._get_bq_client(target_project=target_project)
+            if not client:
+                return
+
+            from google.cloud.bigquery import (
+                LoadJobConfig, WriteDisposition,
+            )
+
+            ingested_at = datetime.now(timezone.utc).isoformat()
+
+            entity_tables: List[Tuple[str, List[Dict]]] = [
+                ("contacts", self._flatten_for_bq(contacts)),
+                ("opportunities", self._flatten_for_bq(opportunities)),
+                ("events", self._flatten_for_bq(events)),
+                ("pipeline_stages", pipelines),
+                ("tags", tags),
+            ]
+
+            for table_name, rows in entity_tables:
+                if not rows:
+                    logger.debug(f"GHL BQ raw: no rows for {table_name}, skipping")
+                    continue
+
+                # Stamp ingestion time on every row
+                for row in rows:
+                    row["ingested_at"] = ingested_at
+
+                table_id = f"{target_project}.{bq_dataset}.{table_name}"
+
+                job_config = LoadJobConfig(
+                    autodetect=True,
+                    write_disposition=WriteDisposition.WRITE_TRUNCATE,
+                )
+                job = client.load_table_from_json(rows, table_id, job_config=job_config)
+                job.result()
+
+                logger.info(
+                    f"GHL BQ raw: wrote {len(rows)} rows to {table_id}"
+                )
+
+        except Exception as e:
+            logger.warning(f"GHL BQ raw entity write failed (non-fatal): {e}")
 
     # ── BigQuery sink (aggregated counts only) ────────────────────
 
