@@ -586,7 +586,13 @@ class GoHighLevelAdapter(BasePlatformAdapter):
                 if k == "tags" and isinstance(v, list):
                     row["tags"] = ",".join(str(t) for t in v)
                 elif k == "attributions" and isinstance(v, (list, dict)):
-                    row["attributions_json"] = json.dumps(v)
+                    # Strip PII from attributions (ip, userAgent are embedded)
+                    _PII_ATTR_KEYS = {"ip", "userAgent", "user_agent", "ipAddress"}
+                    if isinstance(v, list):
+                        cleaned = [{ak: av for ak, av in attr.items() if ak not in _PII_ATTR_KEYS} for attr in v if isinstance(attr, dict)]
+                    else:
+                        cleaned = {ak: av for ak, av in v.items() if ak not in _PII_ATTR_KEYS}
+                    row["attributions_json"] = json.dumps(cleaned)
                 elif k == "customFields" and isinstance(v, (list, dict)):
                     row["custom_fields_json"] = json.dumps(v)
                 elif isinstance(v, (dict, list)):
