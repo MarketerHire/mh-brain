@@ -1425,79 +1425,7 @@ class SemanticMemoryStore:
         Returns:
             List of dicts with keys: id, text, similarity, pattern, metadata
         """
-        try:
-            from anthropic import Anthropic
-        except ImportError:
-            logger.info("anthropic package not available, falling back to token-based similarity")
-            return self.find_similar_context(query, domain, limit, min_similarity)
-
-        with self._lock:
-            # First, get candidate patterns with loose token similarity
-            candidates = self.find_similar_context(
-                query=query,
-                domain=domain,
-                limit=limit * 3,  # Get more candidates for re-ranking
-                min_similarity=0.05  # Lower threshold for candidates
-            )
-
-            if not candidates:
-                return []
-
-            # Prepare patterns for Claude ranking
-            patterns_text = []
-            for i, candidate in enumerate(candidates):
-                patterns_text.append(
-                    f"{i+1}. [{candidate['id']}] {candidate['text']}"
-                )
-
-            # Use Claude to rank similarity
-            try:
-                client = Anthropic()
-
-                prompt = f"""Rate the semantic similarity of each pattern to the query.
-Query: "{query}"
-
-Patterns:
-{chr(10).join(patterns_text)}
-
-For each pattern, respond with its number and a similarity score from 0.0 to 1.0.
-Format: NUMBER:SCORE (one per line)
-Only include patterns with similarity >= {min_similarity}"""
-
-                response = client.messages.create(
-                    model="claude-3-haiku-20240307",  # Use Haiku for fast/cheap ranking
-                    max_tokens=500,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-
-                # Parse response
-                response_text = response.content[0].text
-                scored_results = []
-
-                for line in response_text.strip().split('\n'):
-                    line = line.strip()
-                    if ':' in line:
-                        try:
-                            parts = line.split(':')
-                            idx = int(parts[0].strip()) - 1
-                            score = float(parts[1].strip())
-
-                            if 0 <= idx < len(candidates) and score >= min_similarity:
-                                result = candidates[idx].copy()
-                                result['similarity'] = score
-                                result['similarity_method'] = 'embedding'
-                                scored_results.append(result)
-                        except (ValueError, IndexError):
-                            continue
-
-                # Sort by similarity
-                scored_results.sort(key=lambda x: x['similarity'], reverse=True)
-
-                return scored_results[:limit]
-
-            except Exception as e:
-                logger.warning(f"Claude similarity ranking failed: {e}, using token-based fallback")
-                return candidates[:limit]
+        return self.find_similar_context(query, domain, limit, min_similarity)
 
     def store_concept(
         self,
@@ -1925,9 +1853,7 @@ class SemanticMemory:
         min_similarity: float = 0.3
     ) -> List[Dict[str, Any]]:
         """
-        Use Claude for semantic similarity (more accurate but slower).
-
-        Falls back to token-based similarity if anthropic is not available.
+        Semantic similarity search using token-based similarity.
 
         Args:
             query: Search query
@@ -1937,72 +1863,7 @@ class SemanticMemory:
         Returns:
             List of matching concepts with similarity scores
         """
-        try:
-            from anthropic import Anthropic
-        except ImportError:
-            logger.info("anthropic package not available, using token-based similarity")
-            return self.find_similar_context(query, limit, min_similarity)
-
-        with self._lock:
-            # Get candidates with loose token similarity
-            candidates = self.find_similar_context(
-                query=query,
-                limit=limit * 3,
-                min_similarity=0.05
-            )
-
-            if not candidates:
-                return []
-
-            # Prepare for Claude ranking
-            concepts_text = [
-                f"{i+1}. [{c['id']}] {c['text']}"
-                for i, c in enumerate(candidates)
-            ]
-
-            try:
-                client = Anthropic()
-
-                prompt = f"""Rate semantic similarity of each concept to the query.
-Query: "{query}"
-
-Concepts:
-{chr(10).join(concepts_text)}
-
-Respond with NUMBER:SCORE (0.0-1.0) per line.
-Only include concepts with similarity >= {min_similarity}"""
-
-                response = client.messages.create(
-                    model="claude-3-haiku-20240307",
-                    max_tokens=500,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-
-                # Parse response
-                response_text = response.content[0].text
-                scored_results = []
-
-                for line in response_text.strip().split('\n'):
-                    if ':' in line:
-                        try:
-                            parts = line.split(':')
-                            idx = int(parts[0].strip()) - 1
-                            score = float(parts[1].strip())
-
-                            if 0 <= idx < len(candidates) and score >= min_similarity:
-                                result = candidates[idx].copy()
-                                result['similarity'] = score
-                                result['similarity_method'] = 'embedding'
-                                scored_results.append(result)
-                        except (ValueError, IndexError):
-                            continue
-
-                scored_results.sort(key=lambda x: x['similarity'], reverse=True)
-                return scored_results[:limit]
-
-            except Exception as e:
-                logger.warning(f"Claude ranking failed: {e}")
-                return candidates[:limit]
+        return self.find_similar_context(query, limit, min_similarity)
 
     def store_pattern(
         self,
